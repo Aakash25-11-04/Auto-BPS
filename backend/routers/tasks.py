@@ -84,15 +84,13 @@ def create_task(
         source_ref=payload.source_ref or "",
         created_by=current_user.user_id,
     )
-    score, reason = priority_engine.score_task(db, task)
-    task.priority_score = score
-    task.priority_reason = reason
+    priority_engine.rescore_task(db, task)
 
     db.add(task)
     db.commit()
     db.refresh(task)
 
-    log(db, "task_submitted", current_user.user_id, {"task_id": task.task_id, "department": task.department, "score": score})
+    log(db, "task_submitted", current_user.user_id, {"task_id": task.task_id, "department": task.department, "score": task.priority_score})
     return task
 
 
@@ -147,13 +145,18 @@ async def import_tasks(
             detail=f"you are {current_user.department}; you may not import tasks for department '{department}'",
         )
     content = await file.read()
+    source_system = csv_importer.DEPARTMENT_SOURCE_SYSTEM.get(department, "CSV")
 
     try:
-        valid_rows, row_errors = csv_importer.parse_upload(file.filename, content, department, db)
+        result = csv_importer.parse_upload(file.filename, content, department, db, source_system=source_system)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"could not parse file: {e}")
+
+    valid_rows = result["valid_tasks"]
+    row_errors = result["row_errors"]
+    review_rows = result["review_rows"]
 
     created = []
     for row in valid_rows:
@@ -165,27 +168,64 @@ async def import_tasks(
             status="submitted",
             **row,
         )
-        score, reason = priority_engine.score_task(db, task)
-        task.priority_score = score
-        task.priority_reason = reason
+        priority_engine.rescore_task(db, task)
         db.add(task)
         created.append(task.task_id)
+
+    batch_id = f"batch-{uuid.uuid4().hex[:10]}"
+    db.add(
+        models.IngestionBatch(
+            batch_id=batch_id,
+            source_system=source_system,
+            department=department,
+            filename=file.filename,
+            rows_in=result["rows_in"],
+            rows_valid=len(created),
+            rows_rejected=len(row_errors),
+            rows_review=len(review_rows),
+            created_by=current_user.user_id,
+        )
+    )
+    for rr in review_rows:
+        db.add(
+            models.ReviewQueueItem(
+                batch_id=batch_id,
+                source_system=source_system,
+                raw_row_json=__import__("json").dumps(rr["raw_row"]),
+                reason=rr["reason"],
+            )
+        )
 
     db.commit()
     log(
         db,
         "task_csv_import",
         current_user.user_id,
-        {"filename": file.filename, "department": department, "created": len(created), "rejected": len(row_errors)},
+        {
+            "batch_id": batch_id,
+            "filename": file.filename,
+            "department": department,
+            "rows_in": result["rows_in"],
+            "duplicates_dropped": result["duplicates_dropped"],
+            "created": len(created),
+            "rejected": len(row_errors),
+            "needs_review": len(review_rows),
+        },
     )
 
     return {
+        "batch_id": batch_id,
         "filename": file.filename,
         "department": department,
+        "source_system": source_system,
+        "rows_in": result["rows_in"],
+        "duplicates_dropped": result["duplicates_dropped"],
         "imported_count": len(created),
         "imported_task_ids": created,
         "rejected_count": len(row_errors),
         "row_errors": row_errors,
+        "review_count": len(review_rows),
+        "review_rows": [{"row": r["row"], "reason": r["reason"]} for r in review_rows],
     }
 
 

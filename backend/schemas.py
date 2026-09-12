@@ -93,6 +93,15 @@ class ScoringConfigUpdate(BaseModel):
 class AssetCriticalityUpdate(BaseModel):
     asset_id: str
     criticality: int = Field(ge=1, le=5)
+    # Optional Layer-3 ML feature fields — left unset, an asset keeps whatever
+    # it already had (or the neutral defaults in ml/features.py).
+    asset_type: Optional[str] = None
+    age_years: Optional[float] = None
+    historical_failure_count: Optional[int] = None
+
+
+class ScoringSourceUpdate(BaseModel):
+    source: str  # rule | ml | blend
 
 
 class UserCreate(BaseModel):

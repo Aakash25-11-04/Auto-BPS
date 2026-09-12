@@ -9,3 +9,15 @@ python-multipart>=0.0.9
 python-jose[cryptography]>=3.3
 bcrypt>=4.1
 reportlab>=4.0
+
+# Layer 2 — PostgreSQL migration support (SQLite remains the local-dev default)
+alembic>=1.13
+psycopg2-binary>=2.9
+
+# Layer 3 — AI / Analytics
+scikit-learn>=1.4
+xgboost>=2.0
+shap>=0.45
+statsmodels>=0.14
+joblib>=1.3
+numpy>=1.26

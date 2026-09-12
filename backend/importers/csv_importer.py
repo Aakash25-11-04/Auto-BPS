@@ -1,8 +1,11 @@
-"""CSV/Excel bulk import with row-level validation.
+"""CSV/Excel bulk import — the ingestion + validation stages of the Layer 2
+pipeline (see backend/pipeline/ for cleaning, normalization, and ID mapping,
+which this module calls into before persisting anything).
 
 Never trusts the file blindly: every row is validated independently and bad
 rows are reported back with the exact reason, while good rows in the same
-file still get imported.
+file still get imported. An unresolvable asset_id is no longer a hard
+rejection — it goes to the review queue instead (see pipeline/id_mapping.py).
 """
 import datetime as dt
 import io
@@ -11,10 +14,13 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 import models
+from pipeline import cleaning, id_mapping, normalization
 
 VALID_DEPARTMENTS = {"ENG", "TD", "SNT"}
 TRUE_STRINGS = {"true", "1", "yes", "y"}
 FALSE_STRINGS = {"false", "0", "no", "n", ""}
+
+DEPARTMENT_SOURCE_SYSTEM = {"ENG": "TMS", "TD": "TDMS", "SNT": "SMMS"}
 
 
 def _to_bool(value, field, errors):
@@ -34,32 +40,48 @@ def _clean(value):
     return "" if s.lower() == "nan" else s
 
 
-def parse_rows(df: pd.DataFrame, department: str, db: Session):
+def parse_rows(df: pd.DataFrame, department: str, db: Session, source_system: str = None):
+    """Returns (valid_tasks, row_errors, review_rows).
+    row_errors: hard validation failures (bad severity, malformed date, ...).
+    review_rows: otherwise-valid rows whose asset_id could not be resolved
+        to a canonical asset — held for human review, never silently
+        dropped and never silently guessed at (see pipeline/id_mapping.py).
+    """
+    source_system = source_system or DEPARTMENT_SOURCE_SYSTEM.get(department, "CSV")
     valid_tasks = []
     row_errors = []
-
-    known_asset_ids = {a.asset_id for a in db.query(models.AssetCriticality.asset_id).all()}
+    review_rows = []
 
     for idx, raw in df.iterrows():
         row_num = idx + 2  # +1 for 0-index, +1 for header line
         errors = []
         row = {k: _clean(v) for k, v in raw.to_dict().items()}
+        row = normalization.normalize_row(row)
 
-        asset_id = row.get("asset_id", "")
+        asset_id_raw = row.get("asset_id", "")
         defect_type = row.get("defect_type", "")
-        corridor_id = row.get("corridor_id", "")
+        corridor_id_raw = row.get("corridor_id", "")
 
-        if not asset_id:
+        canonical_asset_id = None
+        if not asset_id_raw:
             errors.append("asset_id is required")
-        elif asset_id not in known_asset_ids:
-            errors.append(
-                f"unknown asset_id '{asset_id}' — register it under Admin > Asset Criticality before import"
-            )
+        else:
+            canonical_asset_id = id_mapping.resolve_asset_id(db, source_system, asset_id_raw)
+            if canonical_asset_id is None:
+                review_rows.append(
+                    {
+                        "row": row_num,
+                        "reason": f"asset_id '{asset_id_raw}' has no known mapping from {source_system} to a "
+                        "canonical asset — register a mapping under Admin, or register the asset directly, "
+                        "then re-import",
+                        "raw_row": row,
+                    }
+                )
+                continue
 
         if not defect_type:
             errors.append("defect_type is required")
-
-        if not corridor_id:
+        if not corridor_id_raw:
             errors.append("corridor_id is required")
 
         severity_raw = row.get("severity", "")
@@ -111,10 +133,12 @@ def parse_rows(df: pd.DataFrame, department: str, db: Session):
             row_errors.append({"row": row_num, "errors": errors})
             continue
 
+        corridor_id = id_mapping.resolve_corridor_id(db, source_system, corridor_id_raw, strict=False)
+
         valid_tasks.append(
             {
                 "department": department,
-                "asset_id": asset_id,
+                "asset_id": canonical_asset_id,
                 "defect_type": defect_type,
                 "severity": severity,
                 "overdue_days": overdue_days,
@@ -126,10 +150,10 @@ def parse_rows(df: pd.DataFrame, department: str, db: Session):
             }
         )
 
-    return valid_tasks, row_errors
+    return valid_tasks, row_errors, review_rows
 
 
-def parse_upload(filename: str, content: bytes, department: str, db: Session):
+def parse_upload(filename: str, content: bytes, department: str, db: Session, source_system: str = None):
     if department.upper() not in VALID_DEPARTMENTS:
         raise ValueError(f"unknown department '{department}', expected one of {sorted(VALID_DEPARTMENTS)}")
 
@@ -139,4 +163,14 @@ def parse_upload(filename: str, content: bytes, department: str, db: Session):
         df = pd.read_csv(io.BytesIO(content), dtype=str, comment="#", keep_default_na=True)
 
     df.columns = [c.strip() for c in df.columns]
-    return parse_rows(df, department.upper(), db)
+    rows_in = len(df)
+    df, duplicates_dropped = cleaning.deduplicate(df)
+
+    valid_tasks, row_errors, review_rows = parse_rows(df, department.upper(), db, source_system)
+    return {
+        "rows_in": rows_in,
+        "duplicates_dropped": duplicates_dropped,
+        "valid_tasks": valid_tasks,
+        "row_errors": row_errors,
+        "review_rows": review_rows,
+    }

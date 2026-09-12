@@ -15,8 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 import seed
-from database import Base, SessionLocal, engine
-from routers import admin, auth as auth_router, corridor, schedule, tasks
+from database import Base, DATABASE_URL, SessionLocal, engine
+from routers import admin, auth as auth_router, corridor, decision, ml, pipeline, schedule, tasks
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend")
 
@@ -26,7 +26,14 @@ DEMO_CORRIDOR = os.environ.get("ABPS_DEMO_CORRIDOR", "NDLS-GZB")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    # SQLite (the zero-config local-dev default) still gets its schema from
+    # create_all() automatically, so `python main.py` keeps working with no
+    # extra step. A real deployment (ABPS_DATABASE_URL pointing at Postgres)
+    # is expected to own its schema via Alembic instead — run
+    # `alembic upgrade head` before starting the app — so create_all() is
+    # skipped there rather than fighting Alembic for ownership of the schema.
+    if DATABASE_URL.startswith("sqlite"):
+        Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
         seed.seed_baseline_users(db)
@@ -51,6 +58,9 @@ app.include_router(tasks.router)
 app.include_router(corridor.router)
 app.include_router(schedule.router)
 app.include_router(admin.router)
+app.include_router(pipeline.router)
+app.include_router(ml.router)
+app.include_router(decision.router)
 
 
 @app.get("/health")

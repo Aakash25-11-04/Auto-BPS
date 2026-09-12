@@ -66,11 +66,16 @@ def load_stations(db: Session) -> int:
         if not code or code in seen:
             continue
         seen.add(code)
+        geom = feat.get("geometry") or {}
+        coords = geom.get("coordinates") if geom.get("type") == "Point" else None
+        lon, lat = (coords[0], coords[1]) if coords and len(coords) == 2 else (None, None)
         rows.append(
             {
                 "station_code": code,
                 "station_name": props.get("name") or code,
                 "zone": props.get("zone") or "",
+                "lat": lat,
+                "lon": lon,
             }
         )
     db.bulk_insert_mappings(models.Station, rows)

@@ -1,0 +1,39 @@
+version: "3.8"
+
+# Optional PostgreSQL for ABPS. SQLite (no setup at all) remains the default
+# for local development — this is here for anyone who wants to run against a
+# real Postgres instance, per the Layer-2 requirement to support both.
+#
+# Usage:
+#   docker compose up -d
+#   export ABPS_DATABASE_URL=postgresql://abps:abps@localhost:5432/abps
+#   cd backend && python -m alembic -c ../alembic.ini upgrade head
+#   python main.py
+#
+# NOTE ON THIS BUILD: Docker was not available in the sandbox this project
+# was developed and verified in, so this compose file's config is correct
+# and the app's Postgres code path (a plain SQLAlchemy connection string) is
+# unchanged from what already worked, but a live Postgres instance itself
+# was NOT exercised end-to-end here — see README.md "Layer 2" for exactly
+# what was and wasn't verified.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: abps-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: abps
+      POSTGRES_PASSWORD: abps
+      POSTGRES_DB: abps
+    ports:
+      - "5432:5432"
+    volumes:
+      - abps_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U abps"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  abps_postgres_data:

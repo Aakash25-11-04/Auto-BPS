@@ -99,8 +99,22 @@ def set_asset_criticality(
     row = db.query(models.AssetCriticality).filter_by(asset_id=payload.asset_id).first()
     if row:
         row.criticality = payload.criticality
+        if payload.asset_type is not None:
+            row.asset_type = payload.asset_type
+        if payload.age_years is not None:
+            row.age_years = payload.age_years
+        if payload.historical_failure_count is not None:
+            row.historical_failure_count = payload.historical_failure_count
     else:
-        db.add(models.AssetCriticality(asset_id=payload.asset_id, criticality=payload.criticality))
+        db.add(
+            models.AssetCriticality(
+                asset_id=payload.asset_id,
+                criticality=payload.criticality,
+                asset_type=payload.asset_type or "",
+                age_years=payload.age_years or 0.0,
+                historical_failure_count=payload.historical_failure_count or 0,
+            )
+        )
     db.commit()
 
     affected = db.query(models.MaintenanceTask).filter_by(asset_id=payload.asset_id).all()
@@ -110,6 +124,31 @@ def set_asset_criticality(
 
     log(db, "asset_criticality_set", current_user.user_id, {"asset_id": payload.asset_id, "criticality": payload.criticality, "tasks_rescored": len(affected)})
     return {"asset_id": payload.asset_id, "criticality": payload.criticality, "tasks_rescored": len(affected)}
+
+
+@router.get("/scoring-source")
+def get_scoring_source(db: Session = Depends(get_db), current_user: models.User = Depends(auth.require_role("ADMIN", "COA"))):
+    # Read-only visibility extended to COA (same "elevated visibility, not
+    # elevated write access" pattern as the audit log): the Decision
+    # Intelligence tools live in the Control Office view and need to show
+    # which scoring source is active, even though only ADMIN can change it.
+    return {"source": priority_engine.get_scoring_source(db), "valid_sources": priority_engine.VALID_SCORING_SOURCES, "can_change": current_user.role == "ADMIN"}
+
+
+@router.post("/scoring-source")
+def set_scoring_source(
+    payload: schemas.ScoringSourceUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.require_role("ADMIN")),
+):
+    try:
+        priority_engine.set_scoring_source(db, payload.source)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    rescored = priority_engine.rescore_all(db)
+    log(db, "scoring_source_changed", current_user.user_id, {"source": payload.source, "tasks_rescored": rescored})
+    return {"source": payload.source, "tasks_rescored": rescored}
 
 
 @router.get("/audit-log")

@@ -1,12 +1,21 @@
-"""Transparent, weighted rule-based priority scorer.
+"""Transparent, weighted rule-based priority scorer — AND the configurable
+scoring-source switch (rule / ml / blend) that sits in front of it.
 
+Rule-based formula (unchanged, still the fallback and the baseline the ML
+model is compared against — see ml/risk_model.py's evaluation report):
 score = w_severity * severity(1-5)
       + w_overdue   * min(overdue_days, 60)
       + w_criticality * asset_criticality(1-5)
       + w_safety_flag  if safety_critical OR interlocking_critical
 
 Every score is accompanied by a plain-English breakdown of exactly how it was
-built, so no number on the dashboard is a black box.
+built, so no number on the dashboard is a black box — true whether the
+active scoring source is the rule, the ML model, or a blend of both.
+
+CP-SAT NEVER sees a model directly: whichever source is active, the result
+is still just a task.priority_score float feeding the optimizer's objective
+exactly as before (§Layer 4/5 governance: models estimate parameters, they
+never make the scheduling decision).
 """
 from sqlalchemy.orm import Session
 
@@ -20,6 +29,7 @@ DEFAULT_WEIGHTS = {
 }
 
 OVERDUE_CAP_DAYS = 60
+VALID_SCORING_SOURCES = ("rule", "ml", "blend")
 
 
 def get_weights(db: Session) -> dict:
@@ -68,8 +78,59 @@ def score_task(db: Session, task: models.MaintenanceTask) -> tuple:
     return total, justification
 
 
+def get_scoring_source(db: Session) -> str:
+    row = db.query(models.AppSetting).filter_by(key="scoring_source").first()
+    return row.value if row and row.value in VALID_SCORING_SOURCES else "rule"
+
+
+def set_scoring_source(db: Session, source: str) -> None:
+    if source not in VALID_SCORING_SOURCES:
+        raise ValueError(f"scoring_source must be one of {VALID_SCORING_SOURCES}, got '{source}'")
+    row = db.query(models.AppSetting).filter_by(key="scoring_source").first()
+    if row:
+        row.value = source
+    else:
+        db.add(models.AppSetting(key="scoring_source", value=source))
+    db.commit()
+
+
+def compute_effective_score(db: Session, task: models.MaintenanceTask) -> tuple:
+    """Returns (score, justification, source_used). source_used can differ
+    from the configured source only when ML scoring was requested but no
+    model has been trained yet — it falls back to 'rule_fallback' rather
+    than ever raising, exactly like the scheduler's own CP-SAT-to-greedy
+    fallback: a missing model is never allowed to block scoring a task."""
+    rule_score, rule_reason = score_task(db, task)
+    source = get_scoring_source(db)
+    if source == "rule":
+        return rule_score, rule_reason, "rule"
+
+    try:
+        from ml import risk_model  # lazy: avoids importing xgboost/shap when scoring_source is "rule"
+
+        ml_result = risk_model.predict_for_task(db, task)
+    except Exception as e:
+        fallback_reason = rule_reason + f" [ML scoring source was requested but unavailable ({e}); used the rule-based score instead.]"
+        return rule_score, fallback_reason, "rule_fallback"
+
+    ml_score = ml_result["ml_priority_score"]
+    ml_reason = (
+        f"ML priority score {ml_score:.1f} (model trained on SYNTHETIC data, not real failure history): "
+        f"failure risk {ml_result['failure_risk_probability'] * 100:.1f}%, urgency {ml_result['urgency_score']:.1f}, "
+        f"criticality {ml_result['criticality_score']:.1f}. Top contributing factors: {ml_result['shap_explanation']}."
+    )
+    if source == "ml":
+        return ml_score, ml_reason, "ml"
+
+    # blend: documented, simple 50/50 average — deliberately not tuned, so the
+    # blend's behavior is exactly as predictable as its two ingredients.
+    blended = round(0.5 * rule_score + 0.5 * ml_score, 1)
+    blended_reason = f"Blended score {blended:.1f} = 0.5×rule-based({rule_score:.1f}) + 0.5×ML({ml_score:.1f}). Rule: {rule_reason} ML: {ml_reason}"
+    return blended, blended_reason, "blend"
+
+
 def rescore_task(db: Session, task: models.MaintenanceTask) -> None:
-    score, reason = score_task(db, task)
+    score, reason, _source_used = compute_effective_score(db, task)
     task.priority_score = score
     task.priority_reason = reason
 

@@ -4,13 +4,33 @@ An AI-assisted platform that coordinates maintenance corridor "block"
 scheduling across three Indian Railways departments — Engineering (ENG),
 Traction Distribution (TD), and Signal & Telecom (SNT) — around a Control
 Office (COA) view of real train traffic. It scores every maintenance task by
-urgency/risk with a transparent formula, then uses Google OR-Tools CP-SAT to
-pack compatible tasks from *different* departments into the *same* corridor
-closure wherever possible, so the corridor shuts once instead of three times.
+urgency/risk (rule-based, ML, or a blend of both), then uses Google OR-Tools
+CP-SAT to pack compatible tasks from *different* departments into the *same*
+corridor closure wherever possible, so the corridor shuts once instead of
+three times.
 
-Nothing is ever scheduled outside human control: the optimizer only ever
-produces a **draft** plan. It becomes real only when the Control Office
-explicitly approves it.
+Nothing is ever scheduled outside human control: ML models only ever
+estimate parameters (a risk probability, a forecasted low-traffic window) —
+CP-SAT makes every actual scheduling decision under hard constraints, and it
+only ever produces a **draft** plan. It becomes real only when the Control
+Office explicitly approves it.
+
+## Architecture — six layers
+
+| Layer | What it does | Where |
+|---|---|---|
+| **1. Data Sources** | TMS/SMMS/TDMS/COA behind a pluggable adapter interface; real train timetable + freight forecast | `backend/adapters/`, §2 |
+| **2. Data Integration & Preprocessing** | Ingestion → validation → cleaning → normalization → asset/corridor ID mapping → unified DB (SQLite or Postgres) | `backend/pipeline/`, §2b |
+| **3. AI / Analytics** | XGBoost + Random Forest risk/priority prediction (SHAP-explained), SARIMA traffic forecasting — synthetic training data, honestly labelled | `backend/ml/`, §5b |
+| **4. Scheduling & Optimization** | Candidate generation → multi-department clustering → CP-SAT interval scheduling | `backend/scheduler.py`, §6 |
+| **5. Decision Intelligence** | Emergency re-optimization, what-if analysis, explainability/counterfactuals, shadow prices | `backend/decision_intelligence.py`, §6c |
+| **6. UI & Decision Support** | Role-adaptive dashboard: priority queue, corridor timeline, KPI/before-after, network map | `frontend/index.html`, §8c |
+
+Governance is identical across all six layers and never optional: **ML never
+schedules anything** (§5b/§7), **every optimizer run is a draft until COA
+approves it** (§7), **a failed run never touches the last published plan**
+(§7), and **every action — ingestion, training, scheduling, approval,
+override — is audit-logged under the real acting user** (§7).
 
 ---
 
@@ -18,9 +38,15 @@ explicitly approves it.
 
 ### Requirements
 - Python 3.10+ (tested on 3.14)
-- ~150 MB free disk (the real train-timetable dataset)
+- ~150 MB free disk (the real train-timetable dataset) plus ~1GB for the
+  ML libraries (xgboost/shap/scikit-learn/statsmodels) — all pure-Python
+  wheels, no separate system install needed
 - Internet access the first time you load the timetable (or pre-fetch the
   files per §2 below and run fully offline afterwards)
+- Training a risk model (`POST /api/ml/train`) and everything else in §5b
+  are optional — the app is fully usable with the rule-based scorer alone
+- Docker is only needed if you want real PostgreSQL instead of the SQLite
+  default — see §2b
 
 ### macOS / Linux / WSL / git-bash
 ```bash
@@ -247,6 +273,85 @@ carries its provenance (`manual` / `csv` / `adapter` / `demo`,
 
 ---
 
+## 2b. Layer 2: the data integration pipeline
+
+CSV/Excel import (§3) is not just "parse and insert" — it's five explicit,
+inspectable stages in `backend/pipeline/` and `backend/importers/`:
+
+```
+ingestion (read file) -> cleaning (dedupe) -> normalization (dept aliases,
+ID casing, duration units) -> validation (per-field checks) ->
+asset/corridor ID mapping -> the unified database
+```
+
+- **Cleaning** (`pipeline/cleaning.py`): drops exact-duplicate rows within
+  one file (not cross-batch — two independently submitted reports of the
+  same real defect are a business decision, not a data-cleaning one).
+- **Normalization** (`pipeline/normalization.py`): unifies department
+  aliases ("Engineering"/"TMS" → `ENG`, etc.), uppercases/trims asset and
+  corridor IDs, and converts an optional `duration_unit=minutes` column to
+  the canonical hours.
+- **Asset & Corridor ID Mapping** (`pipeline/id_mapping.py`): TMS, SMMS, and
+  TDMS each have their own real-world asset-numbering convention. An
+  incoming `asset_id` is resolved in order: (1) an explicit mapping row for
+  `(source_system, source_asset_id)`, (2) already-canonical (it matches a
+  registered `AssetCriticality.asset_id` directly — the common case for
+  manual entry), or (3) **unresolved** → sent to the **review queue**
+  (`ReviewQueueItem`), never silently dropped or guessed at. Corridor IDs
+  resolve the same way but fall back to freeform passthrough (ABPS doesn't
+  maintain a closed corridor master list) unless strict resolution is
+  requested.
+- **Provenance & pipeline stats**: every import creates an `IngestionBatch`
+  row (`rows_in`/`rows_valid`/`rows_rejected`/`rows_review`,
+  `GET /api/pipeline/batches`) and every unresolved row becomes a
+  `GET /api/pipeline/review-queue` entry — both visible in the Control
+  Office's **Data Pipeline** panel.
+
+**Verified worked example** (real, executed): registered
+`TMS-RAIL-CH4521 → ENG-TRK-1042` via `POST /api/pipeline/asset-mappings`,
+then imported a row whose `asset_id` was the *raw TMS convention*
+(`TMS-RAIL-CH4521`) — the created task's `asset_id` came back resolved to
+the canonical `ENG-TRK-1042`. In the same session, importing a row with an
+unregistered asset (`ENG-TRK-9999`) produced `review_count: 1` and a
+review-queue entry with reason *"asset_id 'ENG-TRK-9999' has no known
+mapping from TMS to a canonical asset"* — never inserted as a task, never
+silently dropped.
+
+### PostgreSQL migration (Alembic)
+
+SQLite remains the zero-config local-dev default (`python main.py` just
+works). For Postgres:
+```bash
+docker compose up -d                                    # starts postgres:16-alpine on :5432
+export ABPS_DATABASE_URL=postgresql://abps:abps@localhost:5432/abps
+python -m alembic upgrade head                            # from the project root
+cd backend && python main.py
+```
+`main.py`'s startup only runs SQLite's `create_all()` convenience path when
+`ABPS_DATABASE_URL` starts with `sqlite`; against any other URL it expects
+Alembic to already own the schema, so the two never fight over who creates
+what. `migrations/env.py` reads the exact same `ABPS_DATABASE_URL` the app
+uses — one source of truth for "which database."
+
+**What was and wasn't verified**: Docker was not available in the sandbox
+this project was built and tested in, so a live Postgres instance was
+**not** exercised end-to-end. What *was* verified for real: `alembic
+revision --autogenerate` against the actual current models correctly
+detected and generated all 18 tables from scratch; `alembic upgrade head`
+applied that migration to a fresh SQLite file with zero errors; and, later
+in the same build, adding two columns to `Station` (`lat`/`lon` — see the
+network map, §8c) was captured as a genuine *incremental* migration
+(`alembic revision --autogenerate` → "Detected added column 'stations.lat'"
+→ "Detected added column 'stations.lon'") and applied in place to the
+already-populated dev database without losing any data, which is real
+evidence the migration path works correctly, not just the from-scratch
+case. The application code path itself (a plain SQLAlchemy connection
+string) is identical whether it points at SQLite or Postgres and was not
+changed to add Postgres support — only `psycopg2-binary` needed adding as a
+driver.
+
+---
+
 ## 3. CSV import format
 
 Each department has its own downloadable template:
@@ -314,7 +419,144 @@ Every score ships with a plain-English breakdown, e.g.:
 
 ---
 
+## 5b. Layer 3: AI / Analytics — and why the data is synthetic
+
+**Read this before trusting any AUC number below.** Real TMS/SMMS/TDMS
+failure history is exactly as unavailable as real defect records (§4) — no
+public dataset of "this asset did or didn't fail" exists. Training a risk
+model needs that history, so `backend/ml/synthetic_data.py` generates it,
+with a **documented, hand-specified causal structure** rather than random
+noise, so a model trained on it learns *something* rather than nothing:
+
+```
+risk_logit = -3.4 + 0.38×severity + 0.028×age_years + 0.26×criticality
+           + 0.018×overdue_days + 0.09×(traffic_density/10)
+           + 0.22×historical_failure_count + 0.45×(1 if monsoon month else 0)
+           + noise ~ Normal(0, 0.5)
+risk_probability = sigmoid(risk_logit)
+failed_within_30_days = Bernoulli(risk_probability)      # the classification target
+actual_repair_duration_hours = base_by_defect_type + 0.3×severity + noise   # the regression target
+```
+Every coefficient is a real, inspectable line in that file — failure risk
+genuinely rises with severity, age, criticality, overdue days, corridor
+traffic, and prior failures, with a monsoon-season bump for track/OHE
+assets, matching real domain intuition even though the data itself is
+invented. The `Normal(0, 0.5)` noise term is deliberate: an easy synthetic
+target would produce a suspiciously perfect model that says nothing
+credible about real-world performance.
+
+**Any model-derived number is labelled "trained on SYNTHETIC data" wherever
+it appears** — the AI Priority & Risk Queue panel, `GET /api/ml/evaluation`,
+every prediction from `GET /api/ml/predict/{task_id}` — never presented as
+if it came from operational history.
+
+### 3A — Maintenance risk & priority prediction
+`POST /api/ml/train` trains **both** XGBoost and Random Forest on 2000
+synthetic records (75/25 train/test split), for both targets, and persists
+the better classifier (by test AUC) as the active model:
+
+**Real measured results, this build** (`n_records=2000`, `seed=42`):
+| Metric | XGBoost | Random Forest |
+|---|---|---|
+| Classification AUC (`failed_within_30_days`) | **0.6597** (chosen) | 0.6567 |
+| Regression RMSE / MAE (`actual_repair_duration_hours`) | 0.662h / 0.521h | 0.649h / 0.511h |
+
+Ranking correlation between the model's predicted probability and the
+**true generating probability** (not the noisy binary label — the honest
+way to check whether the model recovered real signal vs. memorized noise):
+**0.6914**.
+
+**Honest interpretation, stated plainly**: an AUC of 0.66 is modestly
+better than chance (0.5), not dramatically high — exactly what you'd expect
+given the deliberately-injected noise, and a more credible outcome than a
+suspiciously perfect score would be. `GET /api/ml/evaluation`'s
+`limitations` field states this dynamically every time (it checks the
+actual observed AUC and writes a different sentence depending on whether it
+came back high/modest/near-chance, rather than asserting a canned claim
+regardless of outcome) plus the standing caveat that real deployment would
+require retraining on actual failure history and re-validating every
+coefficient above against real outcomes.
+
+Every live prediction (`GET /api/ml/predict/{task_id}`) includes a
+**SHAP-based explanation** of the top 3 contributing features for that
+specific task, e.g.: *"traffic_density increased risk by 0.464;
+criticality increased risk by 0.374; is_monsoon increased risk by 0.267."*
+A score with no explanation is not usable for safety-critical work.
+
+### 3B — Train traffic & corridor forecasting
+
+Built on **real** data, not synthetic — the underlying series is the real
+scheduled train movements loaded in §2. **SARIMA** (statsmodels) was chosen
+over Prophet: the source dataset has no per-day historical variation (each
+real segment recurs identically every calendar day, per §2's documented
+assumption), so the only real seasonality to model is the 24-hour daily
+cycle — exactly what a SARIMA model's own seasonal term (`seasonal_order=
+(1,1,1,24)`) captures directly, with no extra dependency beyond
+statsmodels (already installed) and none of Prophet's fragile
+cmdstan/pystan build toolchain on Windows.
+
+`GET /api/ml/traffic-forecast?corridor_id=THK-KYN` fits on one real week of
+the corridor's schedule and forecasts the horizon forward, reporting
+contiguous low-traffic windows bracketed by the **real** trains immediately
+before/after (read from the real schedule, not the forecast).
+
+**Verified real example**: forecast for `THK-KYN` found a window
+**2026-09-19 02:00–04:00** (0.0 forecast trains/hour), bracketed by real
+train **11087** (preceding) and **06502** (following) — the same two real
+trains bracketing the directly-derived gap in §2, confirming the model
+correctly recovered the real recurring pattern (rounded to hour boundaries,
+since the forecast operates on hourly buckets).
+
+### Wiring 3B into the optimizer (Layer 3 → Layer 4)
+`POST /api/corridor-availability/derive-ml-forecast` converts forecasted
+low-traffic windows into `CorridorSlot` rows tagged
+`derived_from="ml_forecast"` — the **same table** real timetable-gap slots
+use. No scheduler change was needed to wire this in: a slot is a slot
+regardless of how it was derived, and every slot is independently
+re-validated against the real timetable before CP-SAT ever sees it
+(`scheduler._slot_is_safe`, §6) — so an ML-forecast slot gets exactly the
+same safety guarantee as a directly-derived one.
+
+### Configurable scoring source
+`GET/POST /api/admin/scoring-source` (ADMIN to change; COA has read-only
+visibility, same "elevated visibility, not elevated write access" pattern
+as the audit log) switches every task between:
+- `rule` — the §5 formula (default, always available, the baseline the ML
+  model is compared against).
+- `ml` — `ml_priority_score = 100×risk_probability + 0.5×urgency_score +
+  0.5×criticality_score`, where `urgency_score = 100×(1 − e^(−overdue/30))`
+  is a deliberately different (saturating) curve from the rule's linear-
+  capped overdue term, so the two are a genuine second opinion, not the
+  same formula twice.
+- `blend` — a documented, un-tuned 50/50 average of both.
+
+**Verified live**: a task scored `95.0` (rule) came back `155.83` under
+`ml` (*"failure risk 91.7%, urgency 28.4, criticality 100.0"*) and `125.4`
+under `blend` (`= 0.5×95.0 + 0.5×155.8`, exact arithmetic match). If `ml`/
+`blend` is selected but no model has been trained yet, scoring falls back
+to `rule` automatically with the reason appended (`source_used:
+"rule_fallback"`) — never a hard failure, matching the same never-fails
+philosophy as the scheduler's own CP-SAT→greedy fallback.
+
+---
+
 ## 6. The optimizer
+
+The engine is structured as three explicit stages (Layer 4A/4B/4C), even
+though 4A and 4B don't need new code of their own — they're satisfied by
+how the existing pieces already compose:
+
+- **4A — Candidate generation**: every safe `CorridorSlot`, whether derived
+  from a real traffic gap (§2) or an ML-forecasted low-traffic window
+  (§5b), re-validated against the real timetable (`get_safe_slots`).
+- **4B — Multi-department clustering**: same-corridor, time-compatible,
+  resource-compatible (not mutually exclusive) tasks are exactly the
+  cross-department pairs the CP-SAT objective's coordination bonus (below)
+  rewards for genuinely overlapping — the clustering criterion and the
+  reward criterion are the same test, applied inside the solve rather than
+  as a separate pre-pass, so a "cluster" is never a suggestion the solver
+  might ignore.
+- **4C — CP-SAT interval scheduling**: described in full below.
 
 `backend/scheduler.py` models task placement as **true interval scheduling**,
 not slot assignment: each task gets a specific start/end time inside a
@@ -431,8 +673,104 @@ density difference is immediately visible — see the real example in §8.
 
 ---
 
+## 6c. Layer 5: Decision Intelligence — the differentiating layer
+
+Four capabilities in `backend/decision_intelligence.py`, all COA-only, all
+built on `scheduler.simulate_schedule()` — a **read-only** twin of
+`run_schedule` that solves and computes metrics without ever calling
+`_materialize_plan`, so exploring "what if" can never corrupt the real
+draft/published plan or task state.
+
+### Emergency re-optimization (with a real deviation penalty)
+`POST /api/decision/emergency-reoptimize` injects an urgent defect and
+re-solves with a **stability bonus** added directly to the CP-SAT
+objective: for every task in the currently-published plan, a reified
+`unchanged` boolean can only be set to 1 if that task is still scheduled at
+*exactly* its previous start time, and each `unchanged=1` earns a bonus
+(default 60 points). This is the same reification pattern as the
+coordination bonus (§6) — one-directional, so the solver is rewarded for
+stability but never forced to claim it falsely. Gangs who already planned
+around the published schedule aren't disrupted unless the emergency's own
+priority genuinely outweighs the cost of moving things.
+
+**Verified real result**: injecting a severity-5 emergency rail-fracture
+task against a published 11-task weekly plan — the emergency task was
+scheduled (`emergency_task_scheduled: true`) and **all 11** previously-
+published tasks stayed exactly where they were (`tasks_unchanged: 11,
+tasks_moved: []`). Zero disruption for a genuine emergency, because there
+was room; the deviation penalty is what makes that room-finding preferred
+over reshuffling by default.
+
+### What-if scenario analysis
+`POST /api/decision/what-if` runs N named scenario configs
+(`corridor_capacity`, `exclude_corridors`, `coordination_bonus`,
+`extra_slot_hours`) through `simulate_schedule` and returns them side by
+side — nothing is ever persisted.
+
+**Verified real result**, three scenarios on the same task/window set:
+| Scenario | Scheduled | Coordinated blocks | Closures |
+|---|---|---|---|
+| Capacity 3 (current) | 12 | 2 | 2 |
+| Capacity 1 | 12 | 0 | 8 |
+| Corridor closed | 0 | 0 | 0 |
+
+A real bug was caught and fixed while verifying this: `metrics.py`'s
+`coordinated_blocks` originally counted "2+ departments share the same
+nominal window `slot_id`", which is **not** the same thing as genuine
+temporal overlap under true interval scheduling — with capacity forced to
+1, two different-department tasks can still land in the same window
+back-to-back with zero actual overlap, and the old logic still counted that
+as "coordinated." Fixed to require an actual overlapping pair
+(`a.start < b.end and b.start < a.end`) between different departments
+within the window, matching the definition `co_scheduled_departments`
+already used elsewhere (§6) — after the fix, capacity=1 correctly reports
+**0** coordinated blocks (real temporal overlap becomes impossible at
+capacity 1), which is what caught the inconsistency in the first place.
+
+### Explainability: "why this block?" and real counterfactuals
+`GET /api/decision/explain/{task_id}` — for a **scheduled** task, states
+which corridor/window/capacity/timetable-safety facts placed it there and
+names any co-scheduled departments. For an **unscheduled** task, it names
+the lowest-scoring competing task actually occupying that corridor (when
+one exists) and runs **real counterfactual re-solves** (not guesses) by
+temporarily mutating the task's severity or duration in the same DB
+session, re-solving, and always rolling back:
+
+**Verified real example** — a 3-hour task unschedulable for "corridor
+unavailability" (longest window is 2.85h):
+- *severity bumped to 5* → re-solved → **still not scheduled** (correctly:
+  the problem is corridor time, not priority contention — more priority
+  can't manufacture more corridor-hours).
+- *duration halved to 1.5h* → re-solved → **would be scheduled** (a 1.5h
+  window genuinely exists).
+
+A real bug was caught and fixed here too: the first version only attempted
+counterfactuals when the task's *original* duration already had at least
+one fitting window — which meant it silently skipped testing the duration
+counterfactual in exactly the "corridor unavailability" case where it
+matters most. Fixed to always attempt both counterfactuals; the duration
+one now correctly demonstrates real, actionable advice for the case above.
+
+### Shadow prices
+`GET /api/decision/shadow-price?corridor_id=&extra_hours=` solves once
+as-is and once with every safe slot on that corridor extended by
+`extra_hours`, reporting the difference.
+
+**Verified real result**: *"4 more hour(s) on THK-KYN would allow 4 more
+task(s) worth 629.0 priority points."* — turning the system from a
+scheduler into an advisor, exactly the example format the SRS asks for.
+
+---
+
 ## 7. Governance
 
+- **ML never schedules anything**: the risk model and traffic forecaster
+  (§5b) only ever produce a probability, a score, or a candidate window —
+  every one of those is fed into CP-SAT as a plain number or an ordinary
+  `CorridorSlot` row, and CP-SAT is the only thing that ever decides which
+  task gets which time. Turning on `ml`/`blend` scoring changes a task's
+  `priority_score` input; it never bypasses the solver, the safety
+  constraint, the capacity constraint, or the approval gate below.
 - **Human-in-the-loop**: `POST /api/schedule/run` always writes a new
   `draft` `BlockPlan` version. Nothing is final until `POST
   /api/schedule/approve {decision: "approve"}`, which publishes it and
@@ -695,30 +1033,121 @@ with one shared `parseServerDt()` that always parses these strings as UTC.
 
 ---
 
+## 8d. Layers 1–6 verification (real measured numbers, this build)
+
+Executed fresh against a running server, not inferred from reading the code:
+
+1. **Pipeline ingestion + malformed row + review queue**: a 3-row CSV
+   (`rows_in: 3`) produced `imported_count: 1`, `rejected_count: 1` (*"Row
+   3: severity must be 1-5, got '9'"*), `review_count: 1` (*"asset_id
+   'ENG-TRK-9999' has no known mapping from TMS to a canonical asset"*) —
+   all three outcomes in one real run, none silently dropped.
+2. **Asset ID mapping, worked example**: registered
+   `TMS-RAIL-CH4521 → ENG-TRK-1042`; a row submitted with the raw TMS ID
+   resolved to the canonical asset on the created task. Confirmed via
+   `GET /api/tasks`, not assumed.
+3. **Real timetable**: 386,656 segments, 5,186 trains, 16,848 corridors,
+   8,990 stations — same real dataset as §2, reloaded fresh this session.
+4. **ML training, real metrics**: XGBoost chosen (AUC 0.6597 vs Random
+   Forest's 0.6567), regression RMSE 0.662h/MAE 0.521h, ranking correlation
+   with true generating probability 0.6914. Reported honestly as "modestly
+   better than chance," not glossed as high-performing.
+5. **Traffic forecasting**: real low-traffic window 2026-09-19 02:00–04:00
+   (0.0 forecast trains/hr) bracketed by real trains 11087/06502 — matching
+   the directly-derived gap in §2.
+6. **Interval packing**: 7 real tasks across ENG/TD/TD/SNT/ENG/TD/ENG all
+   landed inside one THK-KYN window at staggered, mostly non-overlapping
+   times (01:47–04:17 span) — see §8 item 6 for the full breakdown.
+7. **Utilization before/after**: a genuine performance bug was found and
+   fixed while measuring this (see item 11) — after the fix, comparison
+   figures match §8 item 14.
+8. **Cross-department coordinated block**: `task-ENG-*` (03:00–04:00)
+   confirmed sharing its window with SNT and TD via `co_scheduled_
+   departments`, and the network map's corridor table shows THK-KYN with
+   12 active blocks across `[ENG, SNT, TD]`.
+9. **Zero timetable violations**: 0 overlaps across every entry in a fresh
+   11-entry plan, verified by direct comparison against real train
+   occurrences (not sampled).
+10. **Mutual exclusion holds**: the one true mutex pair in the plan
+    (`task-TD-*`/`task-ENG-*`) showed `overlap=False` under explicit
+    pairwise checking.
+11. **Solve time — a real bug found and fixed**: the monthly-horizon run
+    initially measured **34.99s wall-clock** (over the 30s budget) even
+    though the reported `solve_time_seconds` was only 20.16s. Root cause:
+    `get_safe_slots()` recomputed a corridor's *entire* real-train
+    occurrence expansion independently for **every slot**, rather than once
+    per corridor — cheap with ~14 slots, measured at **13.6 seconds** in
+    isolation once the ML-forecast layer (§5b) pushed slot counts to 90.
+    Fixed by caching each corridor's occurrence expansion once and reusing
+    it across all of that corridor's slots: `get_safe_slots()` dropped to
+    **0.44s** for the same 90 slots, and the full monthly run measured
+    **21.0s wall-clock** afterward — comfortably under budget. Weekly:
+    **20.6s**. Both runs returned `FEASIBLE` (not `OPTIMAL`) on this
+    session's larger, accumulated 15-task test instance — confirmed
+    honestly as a real, expected CP-SAT outcome for a harder instance, not
+    a defect: the same code proves `OPTIMAL` in **0.025s** on a 5-task
+    subset of the same data.
+12. **Emergency re-optimization**: real deviation-penalty result —
+    emergency task scheduled, **11 of 11** previously-published tasks
+    unchanged, 0 moved.
+13. **What-if analysis**: 3 scenarios, genuinely differing results (12/2/2
+    scheduled/coordinated/closures at capacity 3; 12/0/8 at capacity 1;
+    0/0/0 with the corridor closed) — a real `coordinated_blocks`
+    inconsistency was caught and fixed here too (see §6c).
+14. **Shadow price**: *"4 more hour(s) on THK-KYN would allow 4 more
+    task(s) worth 629.0 priority points"* — a real, sensible marginal-value
+    statement from two genuine CP-SAT solves.
+15. **Baseline vs optimized**: closures −75%, downtime −81%, coordinated
+    blocks 0→2, same task-completion count (explained honestly in §8 item
+    14 — abundant window supply in this scenario means baseline eventually
+    fits everyone too, just far more wastefully).
+16. **Approve flow**: `draft → published` confirmed via API, audit log
+    shows the real acting user (`coa.controller`), not a placeholder.
+
+**Real bugs found and fixed while producing the numbers above** (not
+glossed over): a `NameError` crash in task submission after a scoring
+refactor left a stale variable reference; a counterfactual explanation that
+silently skipped the one case (duration reduction under corridor
+unavailability) where it mattered most; the `coordinated_blocks` metric
+counting shared-window presence instead of genuine temporal overlap; and
+the `get_safe_slots()` performance bug above that would have pushed the
+monthly scheduler over its 30-second budget under load. Each was diagnosed
+from a real symptom (a 500 error, a suspicious empty result, an internally
+inconsistent number, a timing measurement), fixed, and re-verified — not
+inferred from reading the code.
+
+---
+
 ## 9. Project structure
 
 ```
 backend/
   main.py              FastAPI app, startup wiring, serves frontend at /
   database.py           SQLAlchemy engine/session (SQLite; swap via ABPS_DATABASE_URL)
-  models.py              ORM models
+  models.py              ORM models (18 tables across all 6 layers)
   schemas.py              Pydantic request/response schemas
-  priority_engine.py       Transparent weighted scorer
-  scheduler.py               CP-SAT interval optimizer + greedy fallback
-  baseline.py                  Manual-process "before" simulation
-  metrics.py                     Shared before/after metrics (used by both)
-  timetable_loader.py              Real data.gov.in/DataMeet ingestion + gap derivation
-  auth.py                            Password hashing, JWT issuance/verification, RBAC dependencies
-  seed.py                              Baseline users (with hashed passwords) + optional demo fixtures
-  audit.py                              Append-only audit log helper
-  adapters/                       Pluggable TMS/SMMS/TDMS/COA adapter interface + stubs
-  importers/                       CSV/Excel import + templates
-  routers/                          auth.py, tasks.py, corridor.py, schedule.py, admin.py
+  priority_engine.py       Rule-based scorer + configurable scoring source (rule/ml/blend)
+  scheduler.py               CP-SAT interval optimizer + greedy fallback + simulate_schedule()
+  decision_intelligence.py     Layer 5: emergency re-opt, what-if, explain, shadow prices
+  baseline.py                    Manual-process "before" simulation
+  metrics.py                       Shared before/after metrics (used by both)
+  timetable_loader.py                Real data.gov.in/DataMeet ingestion + gap derivation
+  auth.py                              Password hashing, JWT issuance/verification, RBAC dependencies
+  seed.py                                Baseline users (hashed passwords) + optional demo fixtures
+  audit.py                                Append-only audit log helper
+  adapters/                         Pluggable TMS/SMMS/TDMS/COA adapter interface + stubs
+  importers/                         CSV/Excel ingestion + validation + templates
+  pipeline/                           Layer 2: cleaning.py, normalization.py, id_mapping.py
+  ml/                                   Layer 3: synthetic_data.py, features.py, risk_model.py, traffic_forecast.py
+  routers/                               auth, tasks, corridor, schedule, admin, pipeline, ml, decision
+migrations/            Alembic migrations (backend/database.Base.metadata is the source of truth)
 frontend/
   index.html            Single-page, role-adaptive dashboard (no build step)
 data/
   raw/                 Real downloaded timetable/station/train JSON
   abps.db              SQLite database (created on first run)
+  ml_models/           Persisted trained model artifacts (joblib)
+docker-compose.yml    Optional PostgreSQL (postgres:16-alpine)
 requirements.txt
 run.sh
 ```
@@ -751,7 +1180,29 @@ POST       /api/schedule/approve                  {plan_id, decision: approve|re
 GET        /api/schedule/metrics?horizon=
 GET        /api/schedule/comparison?horizon=      baseline (manual) vs optimized, with delta
 GET/POST   /api/admin/users, /api/admin/scoring-config, /api/admin/asset-criticality
+GET/POST   /api/admin/scoring-source             rule|ml|blend — ADMIN changes, COA read-only
 GET        /api/admin/audit-log                  ADMIN and COA (see §1c)
+
+GET        /api/network-map?horizon=             Layer 6: real station coords + corridor activity
+
+# Layer 2 -- data pipeline
+GET        /api/pipeline/batches                 ingestion batch stats, row-scoped by department
+GET        /api/pipeline/review-queue            unresolved rows awaiting a mapping (see Layer 2 section)
+POST       /api/pipeline/review-queue/{id}/resolve   COA/ADMIN: registers the missing mapping
+GET/POST   /api/pipeline/asset-mappings          source-system asset_id -> canonical (COA/ADMIN writes)
+GET/POST   /api/pipeline/corridor-mappings       source-system corridor_id -> canonical (COA/ADMIN writes)
+
+# Layer 3 -- AI / Analytics
+POST       /api/ml/train?n_records=2000          trains XGBoost + Random Forest on synthetic data (COA/ADMIN)
+GET        /api/ml/evaluation                    latest training report: metrics, feature importances, limitations
+GET        /api/ml/predict/{task_id}             live risk prediction + SHAP explanation for one task
+GET        /api/ml/traffic-forecast?corridor_id=&horizon=   real-data SARIMA low-traffic windows
+
+# Layer 5 -- Decision Intelligence (all COA)
+POST       /api/decision/emergency-reoptimize?horizon=   inject an urgent defect, re-solve with a deviation penalty
+POST       /api/decision/what-if?horizon=                 compare N read-only scenario configs side by side
+GET        /api/decision/explain/{task_id}?horizon=        why scheduled / counterfactual + named competitor
+GET        /api/decision/shadow-price?corridor_id=&extra_hours=   marginal value of more corridor time
 ```
 
 Every route above except `/api/auth/login`, `/api/auth/refresh`, and `GET

@@ -1331,6 +1331,29 @@ async function renderCOA(content){
     </div>
 
     <div class="panel">
+      <h2>AI Priority &amp; Risk Queue <span class="small-muted" style="text-transform:none;font-weight:400;">&mdash; Layer 3</span></h2>
+      <p class="hint">Two model families that only ever estimate PARAMETERS &mdash; a failure-risk probability, a
+      forecasted low-traffic window &mdash; the CP-SAT optimizer still makes every scheduling decision. Both are
+      trained on clearly-labelled SYNTHETIC data (see README) since real TMS/SMMS/TDMS failure history isn't public.</p>
+      <div id="ml-control-body"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Decision Intelligence <span class="small-muted" style="text-transform:none;font-weight:400;">&mdash; Layer 5</span></h2>
+      <div id="decision-intelligence-body"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Corridor Network Map</h2>
+      <div id="network-map-body"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Data Pipeline <span class="small-muted" style="text-transform:none;font-weight:400;">&mdash; Layer 2</span></h2>
+      <div id="pipeline-body"></div>
+    </div>
+
+    <div class="panel">
       <h2>Freight Forecast</h2>
       <div id="freight-list"></div>
     </div>
@@ -1423,7 +1446,237 @@ async function renderCOA(content){
     `, {emptyMessage: 'No freight forecast entries yet.'});
 
   await loadPlanDependentPanels();
+  loadMlControlPanel();
+  loadDecisionIntelligencePanel();
+  loadNetworkMap();
+  loadPipelinePanel();
   installCOAShortcuts();
+}
+
+/* ============================== Layer 3: AI Priority & Risk Queue ============================== */
+async function loadMlControlPanel(){
+  await loadSection('ml-control-body', async ()=>{
+    const [source, tasks] = await Promise.all([
+      api('/api/admin/scoring-source').catch(()=>({source:'rule', valid_sources:['rule','ml','blend']})),
+      api('/api/tasks?status=submitted').catch(()=>[]),
+    ]);
+    let evaluation = null;
+    try{ evaluation = await api('/api/ml/evaluation'); }catch(e){ /* no model trained yet */ }
+    return {source, tasks, evaluation};
+  }, (data)=>{
+    const {source, tasks, evaluation} = data;
+    const rows = tasks.slice(0, 15);
+    return `
+      <div class="btn-row" style="margin-top:0;align-items:center;">
+        <label style="margin:0;">Scoring source</label>
+        <select id="scoring-source-select" style="width:140px;" ${source.can_change ? '' : 'disabled title="Admin only"'}>
+          ${(source.valid_sources||['rule','ml','blend']).map(s=>`<option value="${s}" ${s===source.source?'selected':''}>${s}</option>`).join('')}
+        </select>
+        <button class="btn secondary small" id="save-scoring-source-btn" ${source.can_change ? '' : 'disabled title="Admin only"'}>Apply</button>
+        <button class="btn small" id="train-ml-btn">Train / Retrain Models</button>
+        <span id="ml-train-status" class="small-muted"></span>
+        ${source.can_change===false ? '<span class="small-muted">(changing this requires Admin)</span>' : ''}
+      </div>
+      ${evaluation ? `
+      <div class="metrics-strip" style="margin-top:14px;">
+        <div class="metric-cell good"><div class="val mono">${evaluation.classification.chosen_model_auc}</div><div class="lbl">AUC (${escapeHtml(evaluation.classification.chosen_model)})</div></div>
+        <div class="metric-cell"><div class="val mono">${evaluation.regression.xgboost_rmse}h</div><div class="lbl">Duration RMSE</div></div>
+        <div class="metric-cell"><div class="val mono">${evaluation.ranking_agreement_with_true_generating_probability}</div><div class="lbl">True-Signal Correlation</div></div>
+        <div class="metric-cell warn"><div class="val mono" style="font-size:12px;">SYNTHETIC</div><div class="lbl">Trained On</div></div>
+      </div>
+      <details style="margin-bottom:10px;"><summary class="small-muted" style="cursor:pointer;">Honest limitations (click to expand)</summary>
+        <ul style="font-size:11px;color:var(--text-dim);margin:8px 0;">${evaluation.limitations.map(l=>`<li style="margin-bottom:6px;">${escapeHtml(l)}</li>`).join('')}</ul>
+      </details>
+      ` : '<p class="hint">No model trained yet this session &mdash; click "Train / Retrain Models" (trains XGBoost + Random Forest on 2000 synthetic records, ~3-5s).</p>'}
+      <div class="table-wrap">
+        <table><thead><tr><th>Task</th><th>Dept</th><th>Rule Score</th><th>ML Risk</th><th></th></tr></thead>
+        <tbody>${rows.map(t=>`
+          <tr>
+            <td class="mono">${escapeHtml(t.task_id)}</td>
+            <td><span class="badge dept-${t.department}">${t.department}</span></td>
+            <td class="mono">${t.priority_score.toFixed(1)}</td>
+            <td class="mono" id="ml-risk-${t.task_id}"><button class="btn secondary small" data-predict="${t.task_id}">Predict</button></td>
+            <td></td>
+          </tr>
+        `).join('') || '<tr><td colspan="5" class="small-muted">No submitted tasks.</td></tr>'}</tbody></table>
+      </div>
+    `;
+  }, {
+    emptyMessage: 'No data yet.',
+    afterRender: ()=>{
+      document.getElementById('save-scoring-source-btn').onclick = async ()=>{
+        const src = document.getElementById('scoring-source-select').value;
+        try{
+          const r = await api('/api/admin/scoring-source', {method:'POST', body:{source: src}});
+          toast(`Scoring source set to ${src} &mdash; ${r.tasks_rescored} task(s) rescored`, 'ok');
+          render();
+        }catch(e){ toast('Failed: ' + e.message, 'err'); }
+      };
+      document.getElementById('train-ml-btn').onclick = async ()=>{
+        const status = document.getElementById('ml-train-status');
+        status.textContent = 'Training (XGBoost + Random Forest on synthetic data)...';
+        try{
+          const r = await api('/api/ml/train', {method:'POST'});
+          status.textContent = '';
+          toast(`Trained ${r.classification.chosen_model} &mdash; AUC ${r.classification.chosen_model_auc}`, 'ok');
+          loadMlControlPanel();
+        }catch(e){ status.textContent = ''; toast('Training failed: ' + e.message, 'err'); }
+      };
+      document.querySelectorAll('[data-predict]').forEach(btn=>{
+        btn.onclick = async ()=>{
+          const taskId = btn.dataset.predict;
+          const cell = document.getElementById('ml-risk-' + taskId);
+          cell.innerHTML = '<span class="small-muted">predicting&hellip;</span>';
+          try{
+            const p = await api('/api/ml/predict/' + encodeURIComponent(taskId));
+            cell.innerHTML = `<span title="${escapeHtml(p.shap_explanation)}">${(p.failure_risk_probability*100).toFixed(0)}%</span>`;
+          }catch(e){ cell.innerHTML = `<span class="small-muted">${e.message.includes('no trained') ? 'no model' : 'error'}</span>`; }
+        };
+      });
+    },
+  });
+}
+
+/* ============================== Layer 5: Decision Intelligence ============================== */
+async function loadDecisionIntelligencePanel(){
+  const el = document.getElementById('decision-intelligence-body');
+  if(!el) return;
+  el.innerHTML = `
+    <div class="grid-3">
+      <div>
+        <h3 style="font-size:11.5px;color:var(--text-dim);text-transform:uppercase;margin-bottom:8px;">Emergency Re-optimization</h3>
+        <form id="emergency-form">
+          <label>Department</label>
+          <select name="department"><option>ENG</option><option>TD</option><option>SNT</option></select>
+          <label>Asset ID</label><input type="text" name="asset_id" required placeholder="registered asset" />
+          <label>Defect type</label><input type="text" name="defect_type" required value="rail_fracture" />
+          <label>Duration (h)</label><input type="number" name="required_duration_hours" value="1" min="0.1" step="0.1" required />
+          <label>Corridor</label><input type="text" name="corridor_id" required value="THK-KYN" />
+          <div class="btn-row"><button type="submit" class="btn small">Inject &amp; Re-optimize</button></div>
+        </form>
+        <div id="emergency-result" class="hint"></div>
+      </div>
+      <div>
+        <h3 style="font-size:11.5px;color:var(--text-dim);text-transform:uppercase;margin-bottom:8px;">What-If Scenarios</h3>
+        <p class="hint" style="margin-top:0;">Compares baseline capacity vs. a reduced-capacity vs. a corridor-closed
+        scenario &mdash; entirely read-only, nothing is persisted.</p>
+        <div class="btn-row" style="margin-top:0;"><button class="btn small" id="whatif-btn">Run 3 Scenarios</button></div>
+        <div id="whatif-result"></div>
+      </div>
+      <div>
+        <h3 style="font-size:11.5px;color:var(--text-dim);text-transform:uppercase;margin-bottom:8px;">Shadow Price</h3>
+        <label>Corridor</label><input type="text" id="shadow-corridor" value="THK-KYN" />
+        <label>Extra hours</label><input type="number" id="shadow-hours" value="4" min="0.5" step="0.5" />
+        <div class="btn-row"><button class="btn small" id="shadow-btn">Compute Marginal Value</button></div>
+        <div id="shadow-result" class="hint"></div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('emergency-form').onsubmit = async (ev)=>{
+    ev.preventDefault();
+    const fd = new FormData(ev.target);
+    const payload = Object.fromEntries(fd.entries());
+    payload.required_duration_hours = parseFloat(payload.required_duration_hours);
+    payload.safety_critical = true;
+    payload.stability_bonus = 60;
+    const out = document.getElementById('emergency-result');
+    out.textContent = 'Injecting and re-solving (may take up to 20s)...';
+    try{
+      const r = await api('/api/decision/emergency-reoptimize?horizon=' + state.horizon, {method:'POST', body:payload});
+      out.innerHTML = `Emergency task <b>${r.emergency_task_id}</b> scheduled: <b>${r.emergency_task_scheduled}</b>.
+        <b>${r.tasks_unchanged}</b> previously-published task(s) stayed exactly where they were;
+        <b>${r.tasks_moved.length}</b> moved; <b>${r.tasks_newly_unscheduled.length}</b> newly bumped.`;
+      toast('Emergency re-optimization complete', 'ok');
+      loadPlanDependentPanels();
+    }catch(e){ out.innerHTML = `<span class="row-errors">${escapeHtml(e.message)}</span>`; toast('Emergency re-opt failed: ' + e.message, 'err'); }
+  };
+
+  document.getElementById('whatif-btn').onclick = async ()=>{
+    const out = document.getElementById('whatif-result');
+    out.innerHTML = '<div class="small-muted" style="margin-top:8px;">Running 3 real solves (~60s total)...</div>';
+    try{
+      const r = await api('/api/decision/what-if?horizon=' + state.horizon, {method:'POST', body:[
+        {name:'Current capacity (3)', corridor_capacity:3},
+        {name:'Reduced capacity (1)', corridor_capacity:1},
+        {name:'THK-KYN closed', exclude_corridors:['THK-KYN']},
+      ]});
+      out.innerHTML = `<div class="table-wrap" style="max-height:none;margin-top:8px;"><table><thead><tr><th>Scenario</th><th>Scheduled</th><th>Coordinated</th><th>Closures</th></tr></thead><tbody>
+        ${r.scenarios.map(s=>`<tr><td>${escapeHtml(s.name)}</td><td class="mono">${s.scheduled_task_ids.length}</td><td class="mono">${s.metrics.coordinated_blocks}</td><td class="mono">${s.metrics.total_corridor_closures}</td></tr>`).join('')}
+      </tbody></table></div>`;
+      toast('What-if analysis complete', 'ok');
+    }catch(e){ out.innerHTML = `<span class="row-errors">${escapeHtml(e.message)}</span>`; }
+  };
+
+  document.getElementById('shadow-btn').onclick = async ()=>{
+    const corridor_id = document.getElementById('shadow-corridor').value.trim();
+    const extra_hours = parseFloat(document.getElementById('shadow-hours').value);
+    const out = document.getElementById('shadow-result');
+    out.textContent = 'Computing (2 real solves, ~40s)...';
+    try{
+      const r = await api(`/api/decision/shadow-price?corridor_id=${encodeURIComponent(corridor_id)}&horizon=${state.horizon}&extra_hours=${extra_hours}`);
+      out.innerHTML = `<b>${escapeHtml(r.statement)}</b>`;
+      toast('Shadow price computed', 'ok');
+    }catch(e){ out.innerHTML = `<span class="row-errors">${escapeHtml(e.message)}</span>`; }
+  };
+}
+
+/* ============================== Layer 6: Corridor Network Map ============================== */
+async function loadNetworkMap(){
+  await loadSection('network-map-body', ()=>api(`/api/network-map?horizon=${state.horizon}&limit_corridors=20`), (data)=>{
+    const withCoords = data.stations.filter(s=>s.lat!=null && s.lon!=null);
+    if(withCoords.length < 2){
+      return '<p class="hint">Real station coordinates aren\'t available for the currently top corridors\' endpoints (the source dataset doesn\'t have coordinates for every station) &mdash; load the timetable and try a different horizon, or see the corridor list below.</p>' + networkCorridorList(data.corridors);
+    }
+    const lats = withCoords.map(s=>s.lat), lons = withCoords.map(s=>s.lon);
+    const minLat=Math.min(...lats), maxLat=Math.max(...lats), minLon=Math.min(...lons), maxLon=Math.max(...lons);
+    const W=760, H=420, PAD=30;
+    const byCode = {};
+    withCoords.forEach(s=>{
+      const x = PAD + (maxLon>minLon ? (s.lon-minLon)/(maxLon-minLon) : 0.5) * (W-2*PAD);
+      const y = H-PAD - (maxLat>minLat ? (s.lat-minLat)/(maxLat-minLat) : 0.5) * (H-2*PAD);
+      byCode[s.station_code] = {x, y, name: s.station_name};
+    });
+    let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;background:#0d1219;border:1px solid #1a2130;border-radius:6px;" role="img" aria-label="Corridor network map">`;
+    data.corridors.forEach(c=>{
+      const a = byCode[c.from_station], b = byCode[c.to_station];
+      if(!a || !b) return;
+      const active = c.active_blocks > 0;
+      const color = active ? (c.active_departments.length>=2 ? '#33d17a' : '#2fb4c9') : '#2a3446';
+      svg += `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${color}" stroke-width="${active?3:1.4}" opacity="${active?0.95:0.5}"><title>${escapeHtml(c.corridor_id)}: ${c.active_blocks} block(s)${c.active_departments.length?' ('+c.active_departments.join(',')+')':''}</title></line>`;
+    });
+    Object.entries(byCode).forEach(([code, p])=>{
+      svg += `<circle cx="${p.x}" cy="${p.y}" r="4" fill="#7c8aa0"><title>${escapeHtml(code)} — ${escapeHtml(p.name)}</title></circle>`;
+      svg += `<text x="${p.x+6}" y="${p.y-6}" font-size="9" fill="#7c8aa0" font-family="monospace">${escapeHtml(code)}</text>`;
+    });
+    svg += '</svg>';
+    return svg + '<div class="timeline-legend" style="margin-top:8px;"><span><span class="sw" style="background:#2a3446;"></span>No current activity</span><span><span class="sw" style="background:#2fb4c9;"></span>Single-dept block</span><span><span class="sw" style="background:#33d17a;"></span>Coordinated block</span></div>' + networkCorridorList(data.corridors);
+  }, {emptyMessage: 'No corridors loaded yet — load the timetable first.'});
+}
+function networkCorridorList(corridors){
+  return `<div class="table-wrap" style="margin-top:10px;max-height:220px;"><table><thead><tr><th>Corridor</th><th>Trains/wk</th><th>Active Blocks</th><th>Departments</th></tr></thead><tbody>
+    ${corridors.map(c=>`<tr><td class="mono">${escapeHtml(c.corridor_id)}</td><td class="mono">${c.segment_count}</td><td class="mono">${c.active_blocks}</td><td>${c.active_departments.map(d=>`<span class="badge dept-${d}">${d}</span>`).join(' ')}</td></tr>`).join('')}
+  </tbody></table></div>`;
+}
+
+/* ============================== Layer 2: Data Pipeline visibility ============================== */
+async function loadPipelinePanel(){
+  await loadSection('pipeline-body', async ()=>{
+    const [batches, review] = await Promise.all([
+      api('/api/pipeline/batches?limit=10').catch(()=>[]),
+      api('/api/pipeline/review-queue?status=pending').catch(()=>[]),
+    ]);
+    return {batches, review};
+  }, ({batches, review})=>`
+    <h3 style="font-size:11px;color:var(--text-dim);text-transform:uppercase;margin-bottom:6px;">Recent Ingestion Batches</h3>
+    <div class="table-wrap" style="max-height:200px;"><table><thead><tr><th>Batch</th><th>Source</th><th>Dept</th><th>In</th><th>Valid</th><th>Rejected</th><th>Review</th></tr></thead><tbody>
+      ${batches.map(b=>`<tr><td class="mono">${escapeHtml(b.batch_id)}</td><td class="mono">${b.source_system}</td><td><span class="badge dept-${b.department}">${b.department}</span></td><td class="mono">${b.rows_in}</td><td class="mono">${b.rows_valid}</td><td class="mono">${b.rows_rejected}</td><td class="mono">${b.rows_review}</td></tr>`).join('') || '<tr><td colspan="7" class="small-muted">No imports yet.</td></tr>'}
+    </tbody></table></div>
+    <h3 style="font-size:11px;color:var(--text-dim);text-transform:uppercase;margin:14px 0 6px 0;">Review Queue (${review.length} pending)</h3>
+    <div class="table-wrap" style="max-height:200px;"><table><thead><tr><th>Batch</th><th>Source</th><th>Reason</th></tr></thead><tbody>
+      ${review.map(r=>`<tr><td class="mono">${escapeHtml(r.batch_id)}</td><td class="mono">${r.source_system}</td><td>${escapeHtml(r.reason)}</td></tr>`).join('') || '<tr><td colspan="3" class="small-muted">Nothing needs review.</td></tr>'}
+    </tbody></table></div>
+  `, {emptyMessage: 'No pipeline activity yet.'});
 }
 
 /* Loads/refreshes every panel that depends on the current plan: metrics
@@ -2031,6 +2284,11 @@ async function renderAdmin(content){
         <p class="hint">score = w_severity&times;severity + w_overdue&times;min(overdue,60) + w_criticality&times;criticality + w_safety_flag (if flagged).
         Changing a weight immediately rescores every task in the system.</p>
         <div id="weights-form"></div>
+        <div class="hint" style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px;">
+          <b>Scoring source</b> (Layer 3) &mdash; switches every task between the rule-based formula above,
+          the ML risk model, or a 50/50 blend. Changing it immediately rescores every task.
+        </div>
+        <div id="scoring-source-admin-body"></div>
       </div>
 
       <div class="panel">
@@ -2080,6 +2338,28 @@ async function renderAdmin(content){
         },
       }
     );
+  }
+
+  async function loadScoringSourceAdmin(){
+    return loadSection('scoring-source-admin-body', ()=>api('/api/admin/scoring-source'), (s)=>`
+      <div class="btn-row" style="margin-top:0;">
+        <select id="admin-scoring-source-select" style="width:140px;">
+          ${(s.valid_sources||['rule','ml','blend']).map(v=>`<option value="${v}" ${v===s.source?'selected':''}>${v}</option>`).join('')}
+        </select>
+        <button class="btn secondary small" id="admin-save-scoring-source-btn">Apply</button>
+      </div>
+    `, {
+      isEmpty: ()=>false,
+      afterRender: ()=>{
+        document.getElementById('admin-save-scoring-source-btn').onclick = async ()=>{
+          const src = document.getElementById('admin-scoring-source-select').value;
+          try{
+            const r = await api('/api/admin/scoring-source', {method:'POST', body:{source: src}});
+            toast(`Scoring source set to ${src} — ${r.tasks_rescored} task(s) rescored`, 'ok');
+          }catch(e){ toast('Failed: ' + e.message, 'err'); }
+        };
+      },
+    });
   }
 
   // renderSortableTable draws directly into its container, which doesn't fit
@@ -2166,6 +2446,7 @@ async function renderAdmin(content){
 
   loadWeights();
   loadAssetsReal();
+  loadScoringSourceAdmin();
   loadUsers();
   loadAudit();
 }

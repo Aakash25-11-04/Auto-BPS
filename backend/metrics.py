@@ -50,8 +50,26 @@ def compute_metrics(scheduled: list, all_tasks: list, safe_slots: list, full_win
             span_hours = (max(ends) - min(starts)).total_seconds() / 3600.0
         total_downtime_hours += span_hours
 
-        depts = {e["department"] for e in entries}
-        if len(depts) >= 2:
+        # A window counts as "coordinated" only if two DIFFERENT-department
+        # tasks in it genuinely overlap in time — not merely because they
+        # both happen to land in the same nominal window. Those are not the
+        # same thing under true interval scheduling: capacity=1 (or any
+        # other constraint) can force two different-department tasks into
+        # the same window back-to-back with zero actual overlap, and that
+        # is not coordination by this system's own definition (see
+        # scheduler.py's co_scheduled_departments, computed the same way).
+        genuinely_coordinated = False
+        for i in range(len(entries)):
+            for j in range(i + 1, len(entries)):
+                a, b = entries[i], entries[j]
+                if a["department"] == b["department"]:
+                    continue
+                if a["start"] < b["end"] and b["start"] < a["end"]:
+                    genuinely_coordinated = True
+                    break
+            if genuinely_coordinated:
+                break
+        if genuinely_coordinated:
             coordinated_blocks += 1
 
     # Deliberately NOT (end - start): for a baseline entry that span is the
