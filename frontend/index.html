@@ -1,0 +1,2176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ABPS &mdash; Automatic Block Planning System</title>
+<style>
+:root{
+  --bg:#0a0d12; --panel:#111620; --panel2:#151b27; --border:#232b3a;
+  --text:#c9d3e0; --text-dim:#7c8aa0; --text-bright:#eef3fb;
+  --accent:#2fb4c9; --accent-dim:#1a5f6b;
+  --green:#33d17a; --amber:#f2b632; --red:#ef4b4b;
+  --eng:#4c8bf5; --td:#f2a542; --snt:#b36bf0; --coa:#2fd4c9;
+  --mono: ui-monospace, "Cascadia Mono", "Consolas", "SFMono-Regular", Menlo, monospace;
+  --sans: "Segoe UI", system-ui, -apple-system, Arial, sans-serif;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13px;height:100%;}
+body{min-height:100vh;}
+#app-shell{display:flex;min-height:100vh;}
+#app-shell[hidden]{display:none;}
+
+/* ---------- login screen ---------- */
+#login-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;}
+#login-screen[hidden]{display:none;}
+.login-card{width:100%;max-width:340px;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:28px 26px;}
+.login-card .logo{font-family:var(--mono);font-weight:700;font-size:22px;color:var(--text-bright);letter-spacing:1px;text-align:center;}
+.login-card .logo .dot{color:var(--accent);}
+.login-card .sub{font-size:11px;color:var(--text-dim);text-align:center;margin-top:4px;margin-bottom:22px;text-transform:uppercase;letter-spacing:0.5px;}
+.login-card .btn{width:100%;margin-top:16px;padding:9px 16px;}
+#login-error{color:var(--red);font-size:11.5px;margin-top:10px;min-height:14px;}
+.login-hint{font-size:10.5px;color:var(--text-dim);margin-top:18px;padding-top:14px;border-top:1px solid var(--border);line-height:1.6;}
+
+/* ---------- current user / impersonation ---------- */
+.current-user-card{border:1px solid var(--border);border-radius:6px;padding:10px;background:var(--panel2);}
+.current-user-card .cu-name{color:var(--text-bright);font-size:12.5px;margin-top:6px;}
+.current-user-card .cu-id{color:var(--text-dim);font-size:10.5px;margin-top:2px;}
+.impersonating-banner{background:#3a2610;border:1px solid #6b4a1a;color:#f2c078;font-size:10.5px;padding:6px 8px;border-radius:5px;margin-top:8px;}
+::-webkit-scrollbar{width:10px;height:10px;}
+::-webkit-scrollbar-track{background:var(--panel);}
+::-webkit-scrollbar-thumb{background:#2a3446;border-radius:4px;}
+
+a{color:var(--accent);}
+button{font-family:var(--sans);cursor:pointer;}
+input,select,textarea{font-family:var(--sans);}
+
+/* ---------- sidebar ---------- */
+#sidebar{
+  width:230px;min-width:230px;background:var(--panel);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;padding:16px 12px;gap:18px;
+}
+#brand{padding:4px 4px 12px 4px;border-bottom:1px solid var(--border);}
+#brand .logo{font-family:var(--mono);font-weight:700;font-size:18px;color:var(--text-bright);letter-spacing:1px;}
+#brand .logo .dot{color:var(--accent);}
+#brand .sub{font-size:10.5px;color:var(--text-dim);margin-top:4px;letter-spacing:0.5px;text-transform:uppercase;}
+
+.sidebar-section-label{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin-bottom:6px;padding-left:2px;}
+#user-switcher{display:flex;flex-direction:column;gap:4px;}
+.user-btn{
+  display:flex;align-items:center;gap:8px;background:transparent;border:1px solid transparent;
+  color:var(--text);padding:8px 8px;border-radius:6px;text-align:left;font-size:12.5px;
+}
+.user-btn:hover{background:var(--panel2);}
+.user-btn.active{background:var(--panel2);border-color:var(--border);color:var(--text-bright);}
+.user-btn .role-chip{
+  font-family:var(--mono);font-size:9.5px;font-weight:700;padding:2px 5px;border-radius:3px;
+  background:#1c2433;color:var(--text-dim);letter-spacing:0.5px;
+}
+.role-ENG .role-chip{color:var(--eng);}
+.role-TD .role-chip{color:var(--td);}
+.role-SNT .role-chip{color:var(--snt);}
+.role-COA .role-chip{color:var(--coa);}
+.role-ADMIN .role-chip{color:#f26d6d;}
+
+#lamp-strip{margin-top:auto;padding-top:12px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:6px;font-size:10.5px;color:var(--text-dim);}
+.lamp-row{display:flex;align-items:center;gap:7px;}
+.lamp{width:8px;height:8px;border-radius:50%;flex:none;box-shadow:0 0 6px currentColor;}
+.lamp.green{background:var(--green);color:var(--green);}
+.lamp.amber{background:var(--amber);color:var(--amber);}
+.lamp.red{background:var(--red);color:var(--red);}
+.lamp.grey{background:#3a4356;color:#3a4356;box-shadow:none;}
+
+/* ---------- main ---------- */
+#main{flex:1;min-width:0;display:flex;flex-direction:column;height:100vh;overflow:hidden;}
+#topbar{
+  padding:12px 22px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;
+  background:linear-gradient(180deg,#0d1219,#0a0d12);
+}
+#topbar h1{font-size:15px;margin:0;color:var(--text-bright);font-weight:600;}
+#topbar .meta{font-family:var(--mono);font-size:11px;color:var(--text-dim);}
+#content{flex:1;overflow-y:auto;padding:20px 22px 60px 22px;}
+
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px 18px;margin-bottom:18px;}
+.panel h2{font-size:12px;text-transform:uppercase;letter-spacing:0.8px;color:var(--text-dim);margin:0 0 14px 0;font-weight:600;}
+.panel h2 .accent{color:var(--accent);}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;}
+@media (max-width:900px){.grid-2,.grid-3{grid-template-columns:1fr;}}
+
+label{display:block;font-size:11px;color:var(--text-dim);margin-bottom:4px;margin-top:10px;}
+label:first-child{margin-top:0;}
+input[type=text],input[type=number],input[type=date],input[type=password],select,textarea{
+  width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text-bright);
+  padding:7px 9px;border-radius:5px;font-size:12.5px;
+}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent-dim);}
+.checkbox-row{display:flex;align-items:center;gap:6px;margin-top:10px;}
+.checkbox-row input{width:auto;}
+.checkbox-row label{margin:0;color:var(--text);}
+
+.btn{
+  background:var(--accent-dim);color:#dff8fb;border:1px solid var(--accent);padding:8px 16px;
+  border-radius:5px;font-size:12px;font-weight:600;letter-spacing:0.3px;
+}
+.btn:hover{background:var(--accent);color:#04181a;}
+.btn.secondary{background:transparent;border-color:var(--border);color:var(--text);}
+.btn.secondary:hover{background:var(--panel2);color:var(--text-bright);}
+.btn.danger{background:#3a1414;border-color:#7a2a2a;color:#ffb3b3;}
+.btn.danger:hover{background:#7a2a2a;}
+.btn.small{padding:4px 9px;font-size:10.5px;}
+.btn:disabled{opacity:0.4;cursor:not-allowed;}
+.btn-row{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;}
+
+.mono{font-family:var(--mono);}
+table{width:100%;border-collapse:collapse;font-size:12px;}
+th{text-align:left;color:var(--text-dim);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:0.4px;
+  padding:6px 8px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--panel);}
+td{padding:7px 8px;border-bottom:1px solid #1a2130;vertical-align:top;}
+tr:hover td{background:#141b28;}
+.table-wrap{max-height:420px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;}
+
+.badge{display:inline-block;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700;font-family:var(--mono);letter-spacing:0.3px;}
+.badge.scheduled{background:#0f3a24;color:var(--green);}
+.badge.submitted{background:#2a2610;color:var(--amber);}
+.badge.unscheduled{background:#3a1414;color:var(--red);}
+.badge.draft{background:#2a2610;color:var(--amber);}
+.badge.published{background:#0f3a24;color:var(--green);}
+.badge.rejected,.badge.superseded{background:#241a2e;color:#a184c9;}
+.badge.dept-ENG{background:#12233d;color:var(--eng);}
+.badge.dept-TD{background:#3d2c12;color:var(--td);}
+.badge.dept-SNT{background:#2c1440;color:var(--snt);}
+.badge.src-manual{background:#1c2433;color:var(--text-dim);}
+.badge.src-csv{background:#122a2c;color:var(--accent);}
+.badge.src-demo{background:#3a1414;color:#ff8080;}
+.badge.src-adapter{background:#1c2433;color:var(--text-dim);}
+
+.score-pill{font-family:var(--mono);font-weight:700;color:var(--text-bright);}
+.justification{font-size:11px;color:var(--text-dim);margin-top:3px;max-width:520px;}
+.small-muted{color:var(--text-dim);font-size:11px;}
+
+.metrics-strip{display:flex;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:18px;}
+.metric-cell{flex:1;padding:12px 16px;border-right:1px solid var(--border);background:var(--panel);}
+.metric-cell:last-child{border-right:none;}
+.metric-cell .val{font-family:var(--mono);font-size:20px;color:var(--text-bright);font-weight:700;}
+.metric-cell .lbl{font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;margin-top:2px;}
+.metric-cell.good .val{color:var(--green);}
+.metric-cell.warn .val{color:var(--amber);}
+.delta-good{color:var(--green);font-weight:700;}
+.delta-bad{color:var(--red);font-weight:700;}
+.delta-neutral{color:var(--text-dim);}
+
+.toast-wrap{position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:8px;z-index:999;}
+.toast{padding:10px 14px;border-radius:6px;font-size:12px;max-width:360px;border:1px solid;box-shadow:0 4px 14px rgba(0,0,0,0.4);}
+.toast.ok{background:#0f2a1c;border-color:#1e5c3a;color:#a8f0c6;}
+.toast.err{background:#2a1414;border-color:#7a2a2a;color:#ffb3b3;}
+.toast.info{background:#101f2c;border-color:#1a5f6b;color:#bfeef5;}
+
+.row-errors{color:var(--red);font-size:11px;}
+.hint{font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.5;}
+
+/* timeline / gantt */
+#timeline-wrap{overflow-x:auto;}
+.timeline-day{display:flex;align-items:stretch;margin-bottom:3px;}
+.timeline-day-label{width:78px;flex:none;font-family:var(--mono);font-size:10.5px;color:var(--text-dim);padding-top:6px;}
+.timeline-track{position:relative;flex:1;min-width:900px;height:34px;background:#0d1219;border:1px solid #1a2130;border-radius:4px;}
+.timeline-hour-grid{position:absolute;inset:0;display:flex;}
+.timeline-hour-grid div{flex:1;border-right:1px solid #171d29;}
+.timeline-hour-grid div:last-child{border-right:none;}
+.tl-train{position:absolute;top:3px;height:6px;background:#3a4356;border-radius:2px;opacity:0.85;}
+.tl-slot{position:absolute;top:11px;height:12px;background:#0f3a24;border:1px solid #1e5c3a;border-radius:2px;}
+.tl-block{position:absolute;top:9px;height:16px;border-radius:3px;border:1px solid rgba(0,0,0,0.3);cursor:default;}
+.tl-block.dept-ENG{background:var(--eng);}
+.tl-block.dept-TD{background:var(--td);}
+.tl-block.dept-SNT{background:var(--snt);}
+.timeline-legend{display:flex;gap:16px;margin-top:10px;font-size:10.5px;color:var(--text-dim);flex-wrap:wrap;}
+.timeline-legend .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle;}
+
+.corridor-picker{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;}
+.corridor-picker > div{flex:1;min-width:160px;}
+.chip-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+.chip{font-family:var(--mono);font-size:10.5px;padding:3px 8px;border:1px solid var(--border);border-radius:12px;color:var(--text-dim);cursor:pointer;}
+.chip:hover{border-color:var(--accent);color:var(--accent);}
+
+.weight-row{display:flex;align-items:center;gap:10px;margin-top:10px;}
+.weight-row label{margin:0;width:160px;flex:none;}
+.weight-row input{width:110px;}
+.weight-row .desc{font-size:10.5px;color:var(--text-dim);}
+
+footer.note{font-size:10.5px;color:var(--text-dim);margin-top:24px;padding-top:14px;border-top:1px solid var(--border);}
+
+/* ---------- accessibility: focus ring on every interactive element ---------- */
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible,
+textarea:focus-visible, [tabindex]:focus-visible{
+  outline:2px solid var(--accent); outline-offset:2px; border-radius:2px;
+}
+input:focus-visible, select:focus-visible{ outline-offset:0; }
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;}
+
+/* ---------- async section states: loading / error / empty ---------- */
+@keyframes shimmer{0%{background-position:-300px 0;}100%{background-position:300px 0;}}
+.skeleton-line{height:13px;border-radius:4px;margin-bottom:8px;background:linear-gradient(90deg,#151b27 25%,#1c2433 37%,#151b27 63%);background-size:600px 100%;animation:shimmer 1.4s ease-in-out infinite;}
+.skeleton-line.w60{width:60%;} .skeleton-line.w80{width:80%;} .skeleton-line.w40{width:40%;}
+.state-box{padding:20px 16px;text-align:center;border:1px dashed var(--border);border-radius:8px;}
+.state-box.error{border-color:#5a2a2a;background:#1a0f0f;}
+.state-box .state-icon{font-family:var(--mono);font-size:18px;margin-bottom:6px;}
+.state-box.error .state-icon{color:var(--red);}
+.state-box .state-msg{color:var(--text);font-size:12px;margin-bottom:10px;}
+.state-box.error .state-msg{color:#ffb3b3;}
+.state-box .state-hint{color:var(--text-dim);font-size:11px;margin-top:4px;}
+
+/* ---------- toasts: add warn variant + progress toast ---------- */
+.toast.warn{background:#2a2110;border-color:#6b5a1a;color:#f2d078;}
+.toast .toast-title{font-weight:700;margin-bottom:2px;}
+.toast .toast-progress{margin-top:6px;font-family:var(--mono);font-size:10.5px;color:inherit;opacity:0.85;}
+
+/* ---------- modal / confirm dialog ---------- */
+.modal-overlay{position:fixed;inset:0;background:rgba(4,6,9,0.72);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px;}
+.modal-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:22px;max-width:460px;width:100%;box-shadow:0 12px 40px rgba(0,0,0,0.5);}
+.modal-card h3{margin:0 0 10px 0;color:var(--text-bright);font-size:14px;}
+.modal-card .modal-body{font-size:12.5px;color:var(--text);line-height:1.6;}
+.modal-card .modal-body .summary-line{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1a2130;font-family:var(--mono);font-size:11.5px;}
+.modal-card .btn-row{justify-content:flex-end;margin-top:18px;}
+
+/* ---------- filters ---------- */
+.filter-bar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px;padding:10px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;}
+.filter-bar > div{min-width:130px;}
+.filter-bar label{margin:0 0 3px 0;}
+.active-filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;}
+.filter-chip{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10.5px;padding:3px 6px 3px 9px;border-radius:12px;background:#12233d;color:var(--eng);border:1px solid #1a3a5c;}
+.filter-chip button{background:none;border:none;color:inherit;padding:0 2px;font-size:12px;line-height:1;}
+
+/* ---------- data table: sortable / searchable / paginated / bulk-select ---------- */
+.table-toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;}
+.table-search{max-width:220px;}
+th.sortable{cursor:pointer;user-select:none;}
+th.sortable button{background:none;border:none;color:inherit;font:inherit;text-transform:inherit;letter-spacing:inherit;padding:0;cursor:pointer;display:flex;align-items:center;gap:4px;}
+th.sortable .sort-arrow{font-size:9px;opacity:0.4;}
+th.sortable.sorted .sort-arrow{opacity:1;color:var(--accent);}
+.bulk-bar{display:none;align-items:center;gap:10px;background:#12233d;border:1px solid #1a3a5c;border-radius:6px;padding:8px 10px;margin-bottom:8px;font-size:11.5px;}
+.bulk-bar.active{display:flex;}
+.pagination{display:flex;align-items:center;gap:8px;justify-content:flex-end;margin-top:8px;font-size:11px;color:var(--text-dim);}
+.pagination button{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:3px 9px;border-radius:4px;font-size:11px;}
+.pagination button:disabled{opacity:0.35;cursor:not-allowed;}
+
+/* ---------- keyboard shortcuts overlay ---------- */
+.shortcuts-hint{position:fixed;bottom:14px;right:14px;font-size:10.5px;color:var(--text-dim);background:var(--panel);border:1px solid var(--border);padding:5px 10px;border-radius:14px;z-index:50;}
+.shortcuts-hint kbd{font-family:var(--mono);background:#1c2433;padding:1px 5px;border-radius:3px;color:var(--text-bright);}
+.shortcuts-table{width:100%;font-size:12px;}
+.shortcuts-table td{padding:6px 4px;border-bottom:1px solid #1a2130;}
+.shortcuts-table kbd{font-family:var(--mono);background:#1c2433;border:1px solid var(--border);padding:2px 7px;border-radius:4px;color:var(--text-bright);}
+
+/* ---------- timeline v2: zoom/pan controls, now-marker, detail panel, drag ---------- */
+.tl-toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;}
+.tl-zoom-group{display:flex;gap:4px;}
+.tl-zoom-group button.active{background:var(--accent);color:#04181a;}
+.tl-now-marker{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--red);z-index:5;box-shadow:0 0 4px var(--red);}
+.tl-now-marker::before{content:'now';position:absolute;top:-14px;left:-12px;font-family:var(--mono);font-size:8.5px;color:var(--red);}
+.tl-block{cursor:grab;touch-action:none;}
+.tl-block:active{cursor:grabbing;}
+.tl-block.dragging{opacity:0.75;z-index:10;box-shadow:0 2px 10px rgba(0,0,0,0.6);}
+.tl-block.selected{outline:2px solid var(--text-bright);outline-offset:1px;}
+.timeline-track{position:relative;}
+.timeline-split{display:flex;gap:16px;align-items:flex-start;}
+.timeline-split > .tl-main{flex:1;min-width:0;}
+.tl-detail-panel{width:280px;flex:none;background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:14px;position:sticky;top:0;}
+.tl-detail-panel h4{margin:0 0 10px 0;font-size:12px;color:var(--text-bright);}
+.tl-detail-panel .dp-row{margin-bottom:9px;font-size:11.5px;}
+.tl-detail-panel .dp-label{color:var(--text-dim);font-size:10px;text-transform:uppercase;letter-spacing:0.4px;margin-bottom:2px;}
+@media (max-width:1100px){.timeline-split{flex-direction:column;} .tl-detail-panel{width:100%;position:static;}}
+
+/* ---------- narrow-width graceful degradation ---------- */
+@media (max-width:860px){
+  #app-shell[hidden]{display:none;}
+  #app-shell{flex-direction:column;height:auto;}
+  #sidebar{width:100%;min-width:0;flex-direction:row;flex-wrap:wrap;height:auto;padding:10px 12px;gap:10px;}
+  #brand{border-bottom:none;padding:0;flex:none;}
+  #lamp-strip{margin-top:0;padding-top:0;border-top:none;flex-direction:row;flex-wrap:wrap;gap:12px;}
+  #main{height:auto;}
+  #content{padding:14px;}
+  .grid-2,.grid-3{grid-template-columns:1fr;}
+  .timeline-track{min-width:600px;}
+}
+</style>
+</head>
+<body>
+
+<div id="login-screen">
+  <div class="login-card">
+    <div class="logo">ABPS<span class="dot">&#9679;</span></div>
+    <div class="sub">Automatic Block Planning &mdash; Sign In</div>
+    <form id="login-form">
+      <label>Username</label>
+      <input type="text" name="username" autocomplete="username" required autofocus />
+      <label>Password</label>
+      <input type="password" name="password" autocomplete="current-password" required />
+      <div id="login-error"></div>
+      <button type="submit" class="btn">Sign In</button>
+    </form>
+    <div class="login-hint">Demo accounts: eng.desk / td.desk / snt.desk / coa.controller / admin.
+    Passwords are printed to the server console on startup &mdash; see README.md.</div>
+  </div>
+</div>
+
+<div id="app-shell" hidden>
+  <div id="sidebar">
+    <div id="brand">
+      <div class="logo">ABPS<span class="dot">&#9679;</span></div>
+      <div class="sub">Automatic Block Planning</div>
+    </div>
+
+    <div>
+      <div class="sidebar-section-label">Signed in as</div>
+      <div id="user-switcher"></div>
+    </div>
+
+    <div id="lamp-strip" role="status" aria-live="polite">
+      <div class="lamp-row"><span class="lamp grey" id="lamp-api" role="img" aria-label="API status: unknown"></span><span id="lamp-api-txt">API</span></div>
+      <div class="lamp-row"><span class="lamp grey" id="lamp-timetable" role="img" aria-label="Timetable status: unknown"></span><span id="lamp-timetable-txt">Timetable data</span></div>
+      <div class="lamp-row"><span class="lamp grey" id="lamp-plan" role="img" aria-label="Plan status: unknown"></span><span id="lamp-plan-txt">Weekly plan</span></div>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="topbar">
+      <h1 id="view-title">ABPS</h1>
+      <div class="meta" id="clock"></div>
+    </div>
+    <div id="content"></div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toasts" role="status" aria-live="polite"></div>
+<div id="modal-root"></div>
+
+<script>
+/* ============================== state & api ============================== */
+const state = {
+  accessToken: null,
+  refreshToken: null,   // null while impersonating (impersonation tokens are access-only)
+  currentUser: null,    // {user_id, name, role, department}
+  adminSession: null,   // stashed {accessToken, refreshToken, user} while impersonating
+  horizon: 'weekly',
+  lastImportResult: null, // {department, html} — survives the re-render an import triggers
+};
+
+// Toast notifications: 'ok'|'err'|'info'|'warn', auto-dismiss, stackable.
+// This — not window.alert() — is the ONLY feedback mechanism used anywhere
+// in this app; there are no alert() calls to replace.
+function toast(msg, kind, opts){
+  kind = kind || 'info';
+  opts = opts || {};
+  const el = document.createElement('div');
+  el.className = 'toast ' + kind;
+  el.setAttribute('role', kind === 'err' ? 'alert' : 'status');
+  if(opts.title){
+    const t = document.createElement('div');
+    t.className = 'toast-title';
+    t.textContent = opts.title;
+    el.appendChild(t);
+  }
+  const body = document.createElement('div');
+  body.textContent = msg;
+  el.appendChild(body);
+  document.getElementById('toasts').appendChild(el);
+  const life = opts.sticky ? null : (opts.duration || 5500);
+  if(life) setTimeout(()=>el.remove(), life);
+  return el; // caller can .remove() early or mutate contents (used by the scheduler-run progress toast)
+}
+
+// Custom, theme-matched confirmation modal — replaces window.confirm() for
+// irreversible actions (publishing a plan, rejecting one, bulk-flagging).
+// Resolves true/false. Focus is trapped to the dialog and Escape cancels.
+function confirmDialog({title, bodyHtml, confirmLabel, cancelLabel, danger}){
+  return new Promise((resolve)=>{
+    const root = document.getElementById('modal-root');
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.setAttribute('role', 'presentation');
+    overlay.innerHTML = `
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <h3 id="modal-title">${escapeHtml(title)}</h3>
+        <div class="modal-body">${bodyHtml}</div>
+        <div class="btn-row">
+          <button class="btn secondary" id="modal-cancel">${escapeHtml(cancelLabel || 'Cancel')}</button>
+          <button class="btn ${danger ? 'danger' : ''}" id="modal-confirm">${escapeHtml(confirmLabel || 'Confirm')}</button>
+        </div>
+      </div>`;
+    root.appendChild(overlay);
+
+    const confirmBtn = overlay.querySelector('#modal-confirm');
+    const cancelBtn = overlay.querySelector('#modal-cancel');
+    const previouslyFocused = document.activeElement;
+
+    function close(result){
+      root.removeChild(overlay);
+      document.removeEventListener('keydown', onKeydown, true);
+      if(previouslyFocused && previouslyFocused.focus) previouslyFocused.focus();
+      resolve(result);
+    }
+    function onKeydown(ev){
+      if(ev.key === 'Escape'){ ev.preventDefault(); close(false); }
+      if(ev.key === 'Tab'){
+        const focusables = overlay.querySelectorAll('button');
+        const first = focusables[0], last = focusables[focusables.length-1];
+        if(ev.shiftKey && document.activeElement === first){ ev.preventDefault(); last.focus(); }
+        else if(!ev.shiftKey && document.activeElement === last){ ev.preventDefault(); first.focus(); }
+      }
+    }
+    confirmBtn.onclick = ()=>close(true);
+    cancelBtn.onclick = ()=>close(false);
+    overlay.addEventListener('click', (ev)=>{ if(ev.target === overlay) close(false); });
+    document.addEventListener('keydown', onKeydown, true);
+    confirmBtn.focus();
+  });
+}
+
+async function api(path, opts, _isRetry){
+  opts = opts || {};
+  const headers = opts.headers ? {...opts.headers} : {};
+  if(state.accessToken){ headers['Authorization'] = 'Bearer ' + state.accessToken; }
+  if(opts.body && !(opts.body instanceof FormData)){
+    headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(opts.body);
+  }
+  let res;
+  try{
+    res = await fetch(path, {...opts, headers});
+    setLamp('api', 'green', 'API');
+  }catch(e){
+    setLamp('api', 'red', 'API unreachable');
+    // A fetch-level failure (backend down, DNS, CORS, offline) has no HTTP
+    // status at all — tagged 0 so callers can tell "server said no" (404,
+    // 400...) apart from "there is no server to ask." This is what makes it
+    // possible for a panel to show "no plan yet, run the scheduler" for a
+    // real 404 while still showing a hard error+retry when the backend is
+    // simply unreachable, instead of conflating the two into one silent
+    // empty state.
+    const err = new Error('Cannot reach the ABPS server — it may be down. Check the API status lamp and retry.');
+    err.status = 0;
+    err.networkError = true;
+    throw err;
+  }
+
+  // 401: the access token is missing/expired/invalid. Try exactly one silent
+  // refresh-and-retry (this is the whole point of keeping a refresh token
+  // around); if that doesn't work, this is a real "please log in again."
+  if(res.status === 401 && !_isRetry){
+    const refreshed = await tryRefresh();
+    if(refreshed){ return api(path, opts, true); }
+    handleSessionExpired();
+    const err = new Error('Session expired — please log in again.');
+    err.status = 401;
+    throw err;
+  }
+
+  // 403: the caller IS authenticated, just not permitted. Distinct from 401
+  // on purpose — the user needs to know which one happened.
+  if(res.status === 403){
+    let detail = 'Forbidden';
+    try{ const j = await res.json(); detail = j.detail || detail; }catch(e){}
+    const err = new Error("You don't have permission to do that: " + detail);
+    err.status = 403;
+    throw err;
+  }
+
+  if(!res.ok){
+    let detail = res.statusText;
+    try{ const j = await res.json(); detail = j.detail || JSON.stringify(j); }catch(e){}
+    const err = new Error(detail);
+    err.status = res.status;
+    throw err;
+  }
+  const ct = res.headers.get('content-type') || '';
+  if(ct.includes('application/json')) return res.json();
+  return res.text();
+}
+
+async function tryRefresh(){
+  if(!state.refreshToken) return false;
+  try{
+    const res = await fetch('/api/auth/refresh', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({refresh_token: state.refreshToken}),
+    });
+    if(!res.ok) return false;
+    const data = await res.json();
+    state.accessToken = data.access_token;
+    state.refreshToken = data.refresh_token;
+    return true;
+  }catch(e){ return false; }
+}
+
+function handleSessionExpired(){
+  // If an admin was impersonating someone and the (access-only, non-
+  // refreshable) impersonated session expired, fall back to the admin's own
+  // still-valid session instead of forcing a full re-login.
+  if(state.adminSession){
+    const admin = state.adminSession;
+    state.accessToken = admin.accessToken;
+    state.refreshToken = admin.refreshToken;
+    state.currentUser = admin.user;
+    state.adminSession = null;
+    toast('The impersonated session expired — back to your admin session.', 'info');
+    renderSidebar();
+    render();
+    return;
+  }
+  state.accessToken = null;
+  state.refreshToken = null;
+  state.currentUser = null;
+  showLogin('Your session expired. Please log in again.');
+}
+
+function setLamp(key, color, text){
+  const l = document.getElementById('lamp-'+key);
+  const t = document.getElementById('lamp-'+key+'-txt');
+  if(l){
+    l.className = 'lamp ' + color;
+    if(text) l.setAttribute('aria-label', t ? (t.textContent + ' status: ' + text) : ('status: ' + text));
+  }
+  if(t && text){ t.textContent = text; }
+}
+
+/* ============================== generic async section loader ============================== *
+ * Every data-dependent panel in this app goes through this instead of a
+ * bare Promise.all + innerHTML swap, so a failed fetch always shows a real
+ * error state with a working Retry button (never a silently blank panel),
+ * loading always shows a skeleton, and an empty result always explains what
+ * to do next instead of rendering nothing. */
+async function loadSection(containerId, loaderFn, renderFn, opts){
+  opts = opts || {};
+  const el = document.getElementById(containerId);
+  if(!el) return null;
+  el.innerHTML = opts.skeleton || `
+    <div class="skeleton-line w80"></div><div class="skeleton-line w60"></div><div class="skeleton-line w40"></div>
+  `;
+  let data;
+  try{
+    data = await loaderFn();
+  }catch(e){
+    el.innerHTML = `
+      <div class="state-box error">
+        <div class="state-icon">&#9888;</div>
+        <div class="state-msg">${escapeHtml(e.message)}</div>
+        <button class="btn secondary small retry-btn">Retry</button>
+      </div>`;
+    el.querySelector('.retry-btn').onclick = ()=>loadSection(containerId, loaderFn, renderFn, opts);
+    return null;
+  }
+  const empty = opts.isEmpty ? opts.isEmpty(data) : (Array.isArray(data) && data.length === 0);
+  if(empty){
+    el.innerHTML = `
+      <div class="state-box">
+        <div class="state-icon">&#9675;</div>
+        <div class="state-msg">${opts.emptyMessage || 'Nothing here yet.'}</div>
+        ${opts.emptyHint ? `<div class="state-hint">${opts.emptyHint}</div>` : ''}
+      </div>`;
+    if(opts.afterEmpty) opts.afterEmpty(el);
+    return data;
+  }
+  el.innerHTML = renderFn(data);
+  if(opts.afterRender) opts.afterRender(data, el);
+  return data;
+}
+
+/* ============================== login / logout ============================== */
+function showLogin(message){
+  document.getElementById('login-screen').hidden = false;
+  document.getElementById('app-shell').hidden = true;
+  document.getElementById('login-error').textContent = message || '';
+  const pwField = document.querySelector('#login-form input[name=password]');
+  if(pwField) pwField.value = '';
+}
+
+function showApp(){
+  document.getElementById('login-screen').hidden = true;
+  document.getElementById('app-shell').hidden = false;
+}
+
+async function handleLoginSubmit(ev){
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const username = fd.get('username');
+  const password = fd.get('password');
+  const errEl = document.getElementById('login-error');
+  errEl.textContent = '';
+  try{
+    const res = await fetch('/api/auth/login', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({username, password}),
+    });
+    if(!res.ok){
+      const j = await res.json().catch(()=>({}));
+      errEl.textContent = j.detail || 'Login failed';
+      return;
+    }
+    const data = await res.json();
+    state.accessToken = data.access_token;
+    state.refreshToken = data.refresh_token;
+    state.currentUser = data.user;
+    state.adminSession = null;
+    showApp();
+    renderSidebar();
+    await render();
+    refreshHealthLamps();
+  }catch(e){
+    errEl.textContent = 'Could not reach server: ' + e.message;
+  }
+}
+
+async function doLogout(){
+  try{
+    await api('/api/auth/logout', {method:'POST', body:{refresh_token: state.refreshToken || null}});
+  }catch(e){ /* logging out anyway */ }
+  state.accessToken = null;
+  state.refreshToken = null;
+  state.currentUser = null;
+  state.adminSession = null;
+  toast('Logged out', 'info');
+  showLogin();
+}
+
+/* ============================== bootstrap ============================== */
+async function boot(){
+  tickClock();
+  setInterval(tickClock, 1000);
+  document.getElementById('login-form').addEventListener('submit', handleLoginSubmit);
+  showLogin();
+}
+
+function tickClock(){
+  document.getElementById('clock').textContent = new Date().toISOString().replace('T',' ').slice(0,19) + ' UTC';
+}
+
+async function refreshHealthLamps(){
+  try{
+    await fetch('/health');
+    setLamp('api','green','API online');
+  }catch(e){ setLamp('api','red','API offline'); }
+  try{
+    const tt = await api('/api/timetable?limit=1');
+    setLamp('timetable', tt.length ? 'green' : 'amber', tt.length ? 'Timetable loaded' : 'Timetable not loaded');
+  }catch(e){ setLamp('timetable','amber','Timetable not loaded'); }
+  try{
+    const plan = await api('/api/schedule/plan?horizon=' + state.horizon);
+    setLamp('plan', plan.status === 'published' ? 'green' : 'amber', 'Plan: ' + plan.status);
+  }catch(e){ setLamp('plan','grey','No plan yet'); }
+}
+
+/* ---------- sidebar: identity, logout, admin-only impersonation ---------- */
+function renderSidebar(){
+  const wrap = document.getElementById('user-switcher');
+  const u = state.currentUser;
+  if(!u){ wrap.innerHTML = ''; return; }
+
+  let html = `
+    <div class="current-user-card role-${u.role}">
+      <span class="role-chip">${u.role}</span>
+      <div class="cu-name">${escapeHtml(u.name)}</div>
+      <div class="cu-id mono">${escapeHtml(u.user_id)}</div>
+      ${state.adminSession ? `<div class="impersonating-banner">Impersonating &mdash; acting as this user on behalf of admin <b>${escapeHtml(state.adminSession.user.user_id)}</b></div>` : ''}
+    </div>
+    <div class="btn-row" style="margin-top:8px;">
+      ${state.adminSession ? '<button class="btn secondary small" id="back-to-admin-btn">&larr; Back to Admin</button>' : ''}
+      <button class="btn secondary small" id="logout-btn">Logout</button>
+    </div>
+    <div id="impersonate-panel"></div>
+  `;
+  wrap.innerHTML = html;
+
+  document.getElementById('logout-btn').onclick = doLogout;
+  if(state.adminSession){
+    document.getElementById('back-to-admin-btn').onclick = ()=>{
+      const admin = state.adminSession;
+      state.accessToken = admin.accessToken;
+      state.refreshToken = admin.refreshToken;
+      state.currentUser = admin.user;
+      state.adminSession = null;
+      renderSidebar();
+      render();
+    };
+  }
+
+  // Impersonation ("login as") is strictly ADMIN-initiated: only offered
+  // when the REAL underlying identity (the admin session, even if currently
+  // impersonating someone else) is ADMIN. A department/COA user never sees
+  // this, and the server independently enforces require_role("ADMIN") on
+  // the endpoint regardless of what the UI shows.
+  const realAdminUser = state.adminSession ? state.adminSession.user : u;
+  if(realAdminUser.role === 'ADMIN'){
+    renderImpersonationPicker();
+  }
+}
+
+async function renderImpersonationPicker(){
+  const panel = document.getElementById('impersonate-panel');
+  if(!panel) return;
+  panel.innerHTML = '<div class="sidebar-section-label" style="margin-top:14px;">Login as (admin only)</div><div class="small-muted">Loading users&hellip;</div>';
+
+  const adminToken = state.adminSession ? state.adminSession.accessToken : state.accessToken;
+  const excludeId = state.adminSession ? state.adminSession.user.user_id : state.currentUser.user_id;
+  try{
+    const res = await fetch('/api/admin/users', {headers: {'Authorization': 'Bearer ' + adminToken}});
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const users = await res.json();
+    const others = users.filter(x => x.user_id !== excludeId && x.active);
+    panel.innerHTML = '<div class="sidebar-section-label" style="margin-top:14px;">Login as (admin only)</div>' +
+      (others.length ? others.map(x => `
+        <button class="user-btn role-${x.role} impersonate-btn" data-uid="${x.user_id}">
+          <span class="role-chip">${x.role}</span><span>${escapeHtml(x.name)}</span>
+        </button>
+      `).join('') : '<div class="small-muted">No other users.</div>');
+    panel.querySelectorAll('.impersonate-btn').forEach(btn=>{
+      btn.onclick = () => doImpersonate(btn.dataset.uid);
+    });
+  }catch(e){
+    panel.innerHTML += '<div class="small-muted">Could not load user list.</div>';
+  }
+}
+
+async function doImpersonate(targetUserId){
+  const adminToken = state.adminSession ? state.adminSession.accessToken : state.accessToken;
+  try{
+    const res = await fetch('/api/auth/impersonate', {
+      method: 'POST', headers: {'Content-Type':'application/json', 'Authorization':'Bearer ' + adminToken},
+      body: JSON.stringify({target_user_id: targetUserId}),
+    });
+    if(!res.ok){ const j = await res.json().catch(()=>({})); throw new Error(j.detail || ('HTTP ' + res.status)); }
+    const data = await res.json();
+    if(!state.adminSession){
+      state.adminSession = {accessToken: state.accessToken, refreshToken: state.refreshToken, user: state.currentUser};
+    }
+    state.accessToken = data.access_token;
+    state.refreshToken = null; // impersonated sessions are access-only by design — see routers/auth.py
+    state.currentUser = data.user;
+    toast('Now acting as ' + data.user.user_id + ' (' + data.user.role + ')', 'info');
+    renderSidebar();
+    await render();
+  }catch(e){ toast('Impersonate failed: ' + e.message, 'err'); }
+}
+
+async function render(){
+  const role = state.currentUser ? state.currentUser.role : null;
+  const title = document.getElementById('view-title');
+  const content = document.getElementById('content');
+  content.innerHTML = '<div class="small-muted">Loading&hellip;</div>';
+  try{
+    if(role === 'ENG' || role === 'TD' || role === 'SNT'){
+      title.textContent = deptFullName(role) + ' Desk';
+      await renderDeptDesk(role, content);
+    } else if(role === 'COA'){
+      title.textContent = 'Control Office';
+      await renderCOA(content);
+    } else if(role === 'ADMIN'){
+      title.textContent = 'Administrator';
+      await renderAdmin(content);
+    } else {
+      title.textContent = 'ABPS';
+      content.innerHTML = '<div class="panel">No user selected.</div>';
+    }
+  }catch(e){
+    content.innerHTML = `
+      <div class="panel">
+        <div class="state-box error">
+          <div class="state-icon">&#9888;</div>
+          <div class="state-msg">${escapeHtml(e.message)}</div>
+          <button class="btn secondary small" id="view-retry-btn">Retry</button>
+        </div>
+      </div>`;
+    document.getElementById('view-retry-btn').onclick = render;
+  }
+}
+
+function deptFullName(role){
+  return {ENG:'Engineering', TD:'Traction Distribution', SNT:'Signal &amp; Telecom'}[role] || role;
+}
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fmtDt(s){
+  if(!s) return '&mdash;';
+  return String(s).replace('T',' ').slice(0,16);
+}
+
+/* ============================== priority tiers (FR-DASH-05) ============================== */
+function priorityTier(score){
+  if(score >= 150) return 'Critical';
+  if(score >= 90) return 'High';
+  if(score >= 50) return 'Medium';
+  return 'Low';
+}
+const TIER_COLOR = {Critical:'var(--red)', High:'var(--amber)', Medium:'var(--accent)', Low:'var(--text-dim)'};
+
+/* ============================== reusable filter bar (FR-DASH-05) ==============================
+ * Combinable filters over an in-memory array of task-shaped objects
+ * ({department, corridor_id, priority_score, ...}). Renders active-filter
+ * chips so it's always visible which filters are currently applied, and a
+ * one-click "clear all". Calls onChange(filteredArray) whenever the filter
+ * set changes; the caller re-renders whatever it wants with the result. */
+function renderFilterBar(containerId, sourceRows, options, onChange){
+  const el = document.getElementById(containerId);
+  if(!el) return;
+  options = options || {};
+  const state_ = {department: '', corridor: '', tier: ''};
+
+  const depts = options.showDepartment !== false ? [...new Set(sourceRows.map(r=>r.department))].sort() : [];
+  const corridors = [...new Set(sourceRows.map(r=>r.corridor_id))].filter(Boolean).sort();
+
+  function apply(){
+    let rows = sourceRows;
+    if(state_.department) rows = rows.filter(r=>r.department === state_.department);
+    if(state_.corridor) rows = rows.filter(r=>r.corridor_id === state_.corridor);
+    if(state_.tier) rows = rows.filter(r=>priorityTier(r.priority_score) === state_.tier);
+    renderChips();
+    onChange(rows);
+  }
+
+  function renderChips(){
+    const chipsEl = el.querySelector('.active-filters');
+    if(!chipsEl) return;
+    const chips = [];
+    if(state_.department) chips.push(['department', 'Dept: ' + state_.department]);
+    if(state_.corridor) chips.push(['corridor', 'Corridor: ' + state_.corridor]);
+    if(state_.tier) chips.push(['tier', 'Tier: ' + state_.tier]);
+    chipsEl.innerHTML = chips.map(([key,label])=>
+      `<span class="filter-chip">${escapeHtml(label)}<button type="button" data-clear="${key}" aria-label="Remove filter ${escapeHtml(label)}">&times;</button></span>`
+    ).join('') + (chips.length ? `<button type="button" class="btn secondary small" id="${containerId}-clear-all">Clear all</button>` : '');
+    chipsEl.querySelectorAll('[data-clear]').forEach(btn=>{
+      btn.onclick = ()=>{ state_[btn.dataset.clear] = ''; syncSelects(); apply(); };
+    });
+    const clearAll = document.getElementById(containerId+'-clear-all');
+    if(clearAll) clearAll.onclick = ()=>{ state_.department=''; state_.corridor=''; state_.tier=''; syncSelects(); apply(); };
+  }
+
+  function syncSelects(){
+    const d = el.querySelector('[data-f=department]'); if(d) d.value = state_.department;
+    const c = el.querySelector('[data-f=corridor]'); if(c) c.value = state_.corridor;
+    const t = el.querySelector('[data-f=tier]'); if(t) t.value = state_.tier;
+  }
+
+  el.innerHTML = `
+    <div class="filter-bar" role="group" aria-label="Filters">
+      ${depts.length > 1 ? `<div><label for="${containerId}-dept">Department</label>
+        <select id="${containerId}-dept" data-f="department"><option value="">All</option>${depts.map(d=>`<option value="${d}">${d}</option>`).join('')}</select></div>` : ''}
+      <div><label for="${containerId}-corridor">Corridor</label>
+        <select id="${containerId}-corridor" data-f="corridor"><option value="">All</option>${corridors.map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select></div>
+      <div><label for="${containerId}-tier">Priority tier</label>
+        <select id="${containerId}-tier" data-f="tier"><option value="">All</option>${['Critical','High','Medium','Low'].map(t=>`<option value="${t}">${t}</option>`).join('')}</select></div>
+    </div>
+    <div class="active-filters"></div>
+  `;
+  const deptSel = el.querySelector('[data-f=department]'); if(deptSel) deptSel.onchange = (e)=>{ state_.department = e.target.value; apply(); };
+  el.querySelector('[data-f=corridor]').onchange = (e)=>{ state_.corridor = e.target.value; apply(); };
+  el.querySelector('[data-f=tier]').onchange = (e)=>{ state_.tier = e.target.value; apply(); };
+  renderChips();
+  onChange(sourceRows);
+}
+
+/* ============================== reusable sortable/searchable/paginated table ==============================
+ * columns: [{key, label, sortable, render(row)->html, sortValue(row)->comparable}]
+ * bulkActions: [{label, run(selectedRowObjects)->Promise}] — shown once >=1 row checked
+ * Renders its own toolbar (search + bulk bar) and pagination, and re-renders
+ * itself in place on sort/search/page changes (no full parent re-render). */
+function renderSortableTable(containerId, rows, config){
+  const el = document.getElementById(containerId);
+  if(!el) return;
+  const cfg = Object.assign({pageSize: 25, rowKey: r=>r.id, searchFields: [], bulkActions: null, emptyMessage: 'No rows.'}, config);
+  const tstate = {sortKey: cfg.defaultSortKey || null, sortDir: -1, search: '', page: 1, selected: new Set()};
+
+  function filtered(){
+    let out = rows;
+    if(tstate.search){
+      const q = tstate.search.toLowerCase();
+      out = out.filter(r => cfg.searchFields.some(f => String(r[f] ?? '').toLowerCase().includes(q)));
+    }
+    if(tstate.sortKey){
+      const col = cfg.columns.find(c=>c.key === tstate.sortKey);
+      const sv = col.sortValue || (r=>r[col.key]);
+      out = [...out].sort((a,b)=>{
+        const av = sv(a), bv = sv(b);
+        if(av < bv) return -1 * tstate.sortDir;
+        if(av > bv) return 1 * tstate.sortDir;
+        return 0;
+      });
+    }
+    return out;
+  }
+
+  function draw(){
+    const all = filtered();
+    const totalPages = Math.max(1, Math.ceil(all.length / cfg.pageSize));
+    tstate.page = Math.min(tstate.page, totalPages);
+    const pageRows = all.slice((tstate.page-1)*cfg.pageSize, tstate.page*cfg.pageSize);
+
+    const showBulk = !!cfg.bulkActions;
+    el.innerHTML = `
+      <div class="table-toolbar">
+        ${cfg.searchFields.length ? `<input type="text" class="table-search" placeholder="Search&hellip;" value="${escapeHtml(tstate.search)}" aria-label="Search table" id="${containerId}-search" />` : '<div></div>'}
+        <div class="small-muted">${all.length} row${all.length===1?'':'s'}${all.length !== rows.length ? ` (of ${rows.length})` : ''}</div>
+      </div>
+      ${showBulk ? `<div class="bulk-bar" id="${containerId}-bulkbar"><span id="${containerId}-bulkcount"></span>${cfg.bulkActions.map((a,i)=>`<button class="btn small" data-bulk="${i}">${escapeHtml(a.label)}</button>`).join('')}<button class="btn secondary small" id="${containerId}-bulkclear">Clear selection</button></div>` : ''}
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            ${showBulk ? `<th style="width:26px;"><input type="checkbox" id="${containerId}-selectall" aria-label="Select all rows on this page" /></th>` : ''}
+            ${cfg.columns.map(c => c.sortable ? `
+              <th class="sortable ${tstate.sortKey===c.key?'sorted':''}"><button type="button" data-sort="${c.key}">${escapeHtml(c.label)}<span class="sort-arrow">${tstate.sortKey===c.key ? (tstate.sortDir===1?'▲':'▼') : '▼'}</span></button></th>
+            ` : `<th>${escapeHtml(c.label)}</th>`).join('')}
+          </tr></thead>
+          <tbody>
+            ${pageRows.length ? pageRows.map(r=>`
+              <tr>
+                ${showBulk ? `<td><input type="checkbox" class="row-check" data-key="${escapeHtml(String(cfg.rowKey(r)))}" aria-label="Select row" ${tstate.selected.has(cfg.rowKey(r))?'checked':''} /></td>` : ''}
+                ${cfg.columns.map(c=>`<td>${c.render ? c.render(r) : escapeHtml(String(r[c.key] ?? ''))}</td>`).join('')}
+              </tr>
+            `).join('') : `<tr><td colspan="${cfg.columns.length + (showBulk?1:0)}" class="small-muted">${cfg.emptyMessage}</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+      ${totalPages > 1 ? `
+      <div class="pagination">
+        <span>Page ${tstate.page} of ${totalPages}</span>
+        <button type="button" id="${containerId}-prev" ${tstate.page<=1?'disabled':''}>&larr; Prev</button>
+        <button type="button" id="${containerId}-next" ${tstate.page>=totalPages?'disabled':''}>Next &rarr;</button>
+      </div>` : ''}
+    `;
+
+    const searchInput = document.getElementById(containerId+'-search');
+    if(searchInput){
+      searchInput.oninput = ()=>{ tstate.search = searchInput.value; tstate.page = 1; draw(); };
+    }
+    el.querySelectorAll('[data-sort]').forEach(btn=>{
+      btn.onclick = ()=>{
+        const key = btn.dataset.sort;
+        if(tstate.sortKey === key){ tstate.sortDir *= -1; } else { tstate.sortKey = key; tstate.sortDir = 1; }
+        draw();
+      };
+    });
+    const prevBtn = document.getElementById(containerId+'-prev');
+    if(prevBtn) prevBtn.onclick = ()=>{ tstate.page--; draw(); };
+    const nextBtn = document.getElementById(containerId+'-next');
+    if(nextBtn) nextBtn.onclick = ()=>{ tstate.page++; draw(); };
+
+    if(showBulk){
+      const selectAll = document.getElementById(containerId+'-selectall');
+      if(selectAll) selectAll.onchange = ()=>{
+        pageRows.forEach(r => selectAll.checked ? tstate.selected.add(cfg.rowKey(r)) : tstate.selected.delete(cfg.rowKey(r)));
+        draw();
+      };
+      el.querySelectorAll('.row-check').forEach(cb=>{
+        cb.onchange = ()=>{
+          const key = cb.dataset.key;
+          const match = all.find(r => String(cfg.rowKey(r)) === key);
+          if(cb.checked) tstate.selected.add(cfg.rowKey(match)); else tstate.selected.delete(cfg.rowKey(match));
+          draw();
+        };
+      });
+      const bulkBar = document.getElementById(containerId+'-bulkbar');
+      const bulkCount = document.getElementById(containerId+'-bulkcount');
+      if(bulkBar){
+        bulkBar.classList.toggle('active', tstate.selected.size > 0);
+        if(bulkCount) bulkCount.textContent = tstate.selected.size + ' selected';
+      }
+      el.querySelectorAll('[data-bulk]').forEach(btn=>{
+        btn.onclick = async ()=>{
+          const action = cfg.bulkActions[parseInt(btn.dataset.bulk)];
+          const selectedRows = rows.filter(r => tstate.selected.has(cfg.rowKey(r)));
+          if(!selectedRows.length) return;
+          const ok = await confirmDialog({
+            title: action.label,
+            bodyHtml: `Apply <b>${escapeHtml(action.label)}</b> to <b>${selectedRows.length}</b> selected task(s)? This cannot be bulk-undone.`,
+            confirmLabel: action.label, danger: !!action.danger,
+          });
+          if(!ok) return;
+          try{
+            await action.run(selectedRows);
+            tstate.selected.clear();
+          }catch(e){ toast('Bulk action failed: ' + e.message, 'err'); }
+        };
+      });
+      const clearBtn = document.getElementById(containerId+'-bulkclear');
+      if(clearBtn) clearBtn.onclick = ()=>{ tstate.selected.clear(); draw(); };
+    }
+  }
+  draw();
+}
+
+/* ============================== DEPARTMENT DESK VIEW ============================== */
+async function renderDeptDesk(role, content){
+  content.innerHTML = `
+    <div class="grid-2">
+      <div class="panel">
+        <h2>Submit New Task &mdash; <span class="accent">${role}</span></h2>
+        <form id="task-form">
+          <label>Asset ID</label>
+          <input type="text" name="asset_id" required placeholder="e.g. ${role}-TRK-1042" />
+          <label>Defect Type</label>
+          <input type="text" name="defect_type" required placeholder="e.g. rail_fracture" />
+          <div class="grid-2">
+            <div>
+              <label>Severity (1-5)</label>
+              <input type="number" name="severity" min="1" max="5" required value="3" />
+            </div>
+            <div>
+              <label>Overdue Days</label>
+              <input type="number" name="overdue_days" min="0" value="0" />
+            </div>
+          </div>
+          <div class="grid-2">
+            <div>
+              <label>Required Duration (hours)</label>
+              <input type="number" name="required_duration_hours" min="0.1" step="0.1" required value="2" />
+            </div>
+            <div>
+              <label>Corridor ID</label>
+              <input type="text" name="corridor_id" required placeholder="e.g. THK-KYN" />
+            </div>
+          </div>
+          <div class="checkbox-row">
+            <input type="checkbox" name="safety_critical" id="cb-safety" />
+            <label for="cb-safety">Safety-critical</label>
+          </div>
+          ${role==='SNT' ? `<div class="checkbox-row">
+            <input type="checkbox" name="interlocking_critical" id="cb-interlock" />
+            <label for="cb-interlock">Interlocking-critical</label>
+          </div>` : ''}
+          <div class="btn-row">
+            <button type="submit" class="btn">Submit Task</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="panel">
+        <h2>CSV / Excel Bulk Import</h2>
+        <p class="hint">Download the column template, fill it out, and upload it back. Every row is validated
+        independently &mdash; good rows import even if others fail, and each failure is reported with the exact reason.</p>
+        <div class="btn-row">
+          <a class="btn secondary small" href="/api/tasks/template?department=${role}">Download ${role} Template</a>
+        </div>
+        <label style="margin-top:16px;">Upload filled CSV/XLSX</label>
+        <input type="file" id="import-file" accept=".csv,.xlsx,.xls" />
+        <div class="btn-row">
+          <button class="btn" id="import-btn">Import</button>
+        </div>
+        <div id="import-result">${state.lastImportResult && state.lastImportResult.department === role ? state.lastImportResult.html : ''}</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>My Tasks</h2>
+      <div id="task-filters"></div>
+      <div id="task-table-wrap"></div>
+    </div>
+
+    <div class="panel">
+      <h2>My Allocated Block Windows &mdash; <span class="accent">${state.horizon}</span> plan</h2>
+      <div id="my-windows"></div>
+    </div>
+  `;
+
+  async function flagTask(taskId, kind){
+    const ep = kind === 'safety' ? `/api/tasks/${taskId}/flag-safety` : `/api/tasks/${taskId}/flag-interlocking`;
+    await api(ep, {method:'POST'});
+  }
+
+  function renderTaskTable(tasks){
+    renderSortableTable('task-table-wrap', tasks, {
+      pageSize: 25,
+      rowKey: t => t.task_id,
+      searchFields: ['task_id','asset_id','defect_type','corridor_id'],
+      defaultSortKey: 'priority_score',
+      emptyMessage: 'No tasks match the current filters.',
+      bulkActions: [
+        {
+          label: 'Flag safety-critical', danger: false,
+          run: async (selected)=>{
+            const targets = selected.filter(t=>!t.safety_critical);
+            if(!targets.length){ toast('All selected tasks are already safety-critical.', 'info'); return; }
+            let ok = 0, fail = 0;
+            for(const t of targets){
+              try{ await flagTask(t.task_id, 'safety'); ok++; }catch(e){ fail++; }
+            }
+            toast(`Flagged ${ok} task(s) safety-critical${fail?`, ${fail} failed`:''}.`, fail ? 'warn' : 'ok');
+            loadTasks();
+          },
+        },
+      ],
+      columns: [
+        {key:'task_id', label:'Task ID', sortable:true, render:t=>`<span class="mono">${escapeHtml(t.task_id)}</span>`},
+        {key:'asset_id', label:'Asset', sortable:true, render:t=>`<span class="mono">${escapeHtml(t.asset_id)}</span>`},
+        {key:'defect_type', label:'Defect', sortable:true, render:t=>`${escapeHtml(t.defect_type)}${t.safety_critical?' <span class="badge unscheduled" style="background:#3a1414;color:#ff8f8f;">SAFETY</span>':''}${t.interlocking_critical?' <span class="badge unscheduled" style="background:#241a2e;color:#c79cf0;">INTLK</span>':''}`},
+        {key:'priority_score', label:'Score', sortable:true, render:t=>`<span class="score-pill mono" style="color:${TIER_COLOR[priorityTier(t.priority_score)]}">${t.priority_score.toFixed(1)}</span> <span class="small-muted">${priorityTier(t.priority_score)}</span><div class="justification">${escapeHtml(t.priority_reason)}</div>`},
+        {key:'status', label:'Status', sortable:true, render:t=>`<span class="badge ${t.status}">${t.status}</span>${t.unscheduled_reason ? `<div class="justification">${escapeHtml(t.unscheduled_reason)}</div>`:''}`},
+        {key:'source', label:'Source', sortable:true, render:t=>`<span class="badge src-${t.source}">${t.source}</span>`},
+        {key:'required_duration_hours', label:'Duration', sortable:true, render:t=>`<span class="mono">${t.required_duration_hours}h</span>`},
+        {key:'corridor_id', label:'Corridor', sortable:true, render:t=>`<span class="mono">${escapeHtml(t.corridor_id)}</span>`},
+        {key:'actions', label:'Actions', render:t=>`
+          ${!t.safety_critical ? `<button class="btn secondary small" data-act="safety" data-id="${escapeHtml(t.task_id)}">+Safety</button>` : ''}
+          ${role==='SNT' && !t.interlocking_critical ? `<button class="btn secondary small" data-act="interlock" data-id="${escapeHtml(t.task_id)}">+Interlock</button>` : ''}
+        `},
+      ],
+    });
+    document.getElementById('task-table-wrap').querySelectorAll('button[data-act]').forEach(btn=>{
+      btn.onclick = async ()=>{
+        try{
+          await flagTask(btn.dataset.id, btn.dataset.act);
+          toast('Flag applied and task rescored.', 'ok');
+          loadTasks();
+        }catch(e){ toast('Failed: ' + e.message, 'err'); }
+      };
+    });
+  }
+
+  async function loadTasks(){
+    const filtersEl = document.getElementById('task-filters');
+    const tableEl = document.getElementById('task-table-wrap');
+    filtersEl.innerHTML = '';
+    tableEl.innerHTML = `<div class="skeleton-line w80"></div><div class="skeleton-line w60"></div><div class="skeleton-line w40"></div>`;
+    let tasks;
+    try{
+      tasks = await api('/api/tasks?department=' + role);
+    }catch(e){
+      tableEl.innerHTML = `
+        <div class="state-box error"><div class="state-icon">&#9888;</div>
+        <div class="state-msg">${escapeHtml(e.message)}</div>
+        <button class="btn secondary small" id="task-retry-btn">Retry</button></div>`;
+      document.getElementById('task-retry-btn').onclick = loadTasks;
+      return;
+    }
+    if(!tasks.length){
+      tableEl.innerHTML = `
+        <div class="state-box"><div class="state-icon">&#9675;</div>
+        <div class="state-msg">No tasks yet.</div>
+        <div class="state-hint">Submit one above or import a CSV.</div></div>`;
+      return;
+    }
+    renderFilterBar('task-filters', tasks, {showDepartment:false}, renderTaskTable);
+  }
+  loadTasks();
+
+  loadSection('my-windows', ()=>api('/api/schedule/plan?horizon=' + state.horizon), (plan)=>{
+    const myEntries = plan.entries.filter(e=>e.department === role);
+    if(!myEntries.length){
+      return `<div class="state-box"><div class="state-icon">&#9675;</div><div class="state-msg">No blocks allocated to this department in the current plan.</div></div>`;
+    }
+    return `
+      <p class="small-muted">Plan status: <span class="badge ${plan.status}">${plan.status}</span></p>
+      <div class="table-wrap">
+        <table><thead><tr><th>Task</th><th>Corridor</th><th>Window Start</th><th>Window End</th><th>Shared With</th></tr></thead>
+        <tbody>
+          ${myEntries.map(e=>`
+            <tr>
+              <td class="mono">${e.task_id}</td>
+              <td class="mono">${e.corridor_id}</td>
+              <td class="mono">${fmtDt(e.assigned_window_start)}</td>
+              <td class="mono">${fmtDt(e.assigned_window_end)}</td>
+              <td>${e.co_scheduled_departments.length ? e.co_scheduled_departments.map(d=>`<span class="badge dept-${d}">${d}</span>`).join(' ') : '<span class="small-muted">solo block</span>'}</td>
+            </tr>
+          `).join('')}
+        </tbody></table>
+      </div>
+    `;
+  }, {
+    isEmpty: ()=>false,
+    emptyMessage: 'No plan has been run yet for this horizon.',
+  }).catch(()=>{});
+
+  document.getElementById('task-form').onsubmit = async (ev)=>{
+    ev.preventDefault();
+    const fd = new FormData(ev.target);
+    const payload = {
+      department: role,
+      asset_id: fd.get('asset_id'),
+      defect_type: fd.get('defect_type'),
+      severity: parseInt(fd.get('severity')),
+      overdue_days: parseInt(fd.get('overdue_days') || '0'),
+      required_duration_hours: parseFloat(fd.get('required_duration_hours')),
+      corridor_id: fd.get('corridor_id'),
+      safety_critical: fd.get('safety_critical') === 'on',
+      interlocking_critical: fd.get('interlocking_critical') === 'on',
+      source: 'manual',
+    };
+    try{
+      const t = await api('/api/tasks', {method:'POST', body: payload});
+      toast(`Task ${t.task_id} submitted &mdash; score ${t.priority_score.toFixed(1)}`, 'ok');
+      render();
+    }catch(e){ toast('Submit failed: ' + e.message, 'err'); }
+  };
+
+  document.getElementById('import-btn').onclick = async ()=>{
+    const fileInput = document.getElementById('import-file');
+    if(!fileInput.files.length){ toast('Choose a file first', 'err'); return; }
+    const fd = new FormData();
+    fd.append('file', fileInput.files[0]);
+    try{
+      const result = await api('/api/tasks/import?department=' + role, {method:'POST', body: fd});
+      let html = `<div class="hint"><b>${result.imported_count}</b> imported, <b>${result.rejected_count}</b> rejected.</div>`;
+      if(result.row_errors && result.row_errors.length){
+        html += '<div class="row-errors" style="margin-top:8px;">' + result.row_errors.map(re=>
+          `Row ${re.row}: ${re.errors.join('; ')}`
+        ).join('<br/>') + '</div>';
+      }
+      // Stashed in state (not just written to the DOM) because a successful
+      // import triggers render() below to refresh the task list, which
+      // rebuilds this whole panel from scratch and would otherwise wipe the
+      // message before the user ever sees it.
+      state.lastImportResult = {department: role, html};
+      document.getElementById('import-result').innerHTML = html;
+      toast(`Import complete: ${result.imported_count} ok, ${result.rejected_count} rejected`, result.rejected_count ? 'info':'ok');
+      if(result.imported_count) render();
+    }catch(e){ toast('Import failed: ' + e.message, 'err'); }
+  };
+}
+
+/* ============================== CONTROL OFFICE VIEW ============================== */
+let _coaKeyHandler = null;
+
+// A 404 from GET /schedule/plan legitimately means "no plan yet" — an empty
+// state, not an error. Anything else (network down, 500, auth) is a real
+// failure the caller must surface with a retry, never silently treated the
+// same as "no plan."
+async function fetchCurrentPlanOrNull(){
+  try{
+    return await api('/api/schedule/plan?horizon=' + state.horizon);
+  }catch(e){
+    if(e.status === 404) return null;
+    throw e;
+  }
+}
+
+async function renderCOA(content){
+  content.innerHTML = `
+    <div class="panel">
+      <h2>Horizon</h2>
+      <div class="btn-row" style="margin-top:0;">
+        <button class="btn ${state.horizon==='weekly'?'':'secondary'}" id="h-weekly">Weekly (7d)</button>
+        <button class="btn ${state.horizon==='monthly'?'':'secondary'}" id="h-monthly">Monthly (30d)</button>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel">
+        <h2>1. Real Timetable Data</h2>
+        <p class="hint">Loads the Indian Railways train timetable (data.gov.in, via the DataMeet open mirror) into the database.
+        Corridors and stations are derived from this real data &mdash; nothing here is invented.</p>
+        <div class="btn-row"><button class="btn" id="load-tt-btn">Load / Refresh Timetable</button></div>
+        <div id="tt-result" class="hint"></div>
+      </div>
+
+      <div class="panel">
+        <h2>2. Derive Corridor Availability</h2>
+        <p class="hint">Computes genuine traffic gaps on a corridor from the loaded timetable &mdash; windows with no
+        scheduled train movement, bracketed by the real trains on either side.</p>
+        <div class="corridor-picker">
+          <div>
+            <label>Corridor ID</label>
+            <input type="text" id="derive-corridor" placeholder="e.g. THK-KYN" value="THK-KYN" />
+          </div>
+          <div>
+            <label>Min gap (hours)</label>
+            <input type="number" id="derive-min-gap" value="1.5" step="0.25" min="0.25" />
+          </div>
+          <div style="flex:none;">
+            <button class="btn" id="derive-btn" style="margin-top:0;">Derive</button>
+          </div>
+        </div>
+        <div class="chip-list" id="corridor-chips"></div>
+        <div id="derive-result" class="hint"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>3. Run Scheduler</h2>
+      <p class="hint">Runs the CP-SAT optimizer (25s time budget, deterministic greedy fallback) over all submitted tasks
+      and available corridor slots for the <b>${state.horizon}</b> horizon. Produces a new DRAFT plan &mdash; never
+      overwrites what's published. <kbd style="font-family:var(--mono);background:#1c2433;padding:1px 5px;border-radius:3px;">R</kbd></p>
+      <div class="btn-row"><button class="btn" id="run-btn">Run Scheduler (${state.horizon})</button></div>
+      <div id="run-result" class="hint"></div>
+    </div>
+
+    <div id="metrics-strip-wrap"></div>
+
+    <div class="panel" id="comparison-panel">
+      <h2>Before vs After &mdash; Manual Process vs ABPS (<span class="accent">${state.horizon}</span>)</h2>
+      <p class="hint">Simulates today's manual process &mdash; departments claim windows independently, sequentially
+      (ENG, then TD, then SNT), first-come-first-served, and each claim reserves the WHOLE window exclusively for
+      that department &mdash; and compares it against the optimizer's actual draft/published plan for this horizon.</p>
+      <div class="btn-row" style="margin-top:0;"><button class="btn" id="cmp-load-btn">Compute Comparison</button></div>
+      <div id="cmp-body"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Corridor Timeline</h2>
+      <div class="corridor-picker">
+        <div>
+          <label for="tl-corridor">Corridor to visualize</label>
+          <input type="text" id="tl-corridor" placeholder="e.g. THK-KYN" value="THK-KYN" />
+        </div>
+        <div style="flex:none;"><button class="btn secondary" id="tl-render-btn" style="margin-top:0;">Render Timeline</button></div>
+      </div>
+      <div id="timeline-body"><div class="small-muted" style="margin-top:10px;">Enter a corridor and click Render Timeline.</div></div>
+      <div class="timeline-legend">
+        <span><span class="sw" style="background:#3a4356;"></span>Real train movement</span>
+        <span><span class="sw" style="background:#0f3a24;border:1px solid #1e5c3a;"></span>Available corridor slot</span>
+        <span><span class="sw" style="background:var(--eng);"></span>ENG block</span>
+        <span><span class="sw" style="background:var(--td);"></span>TD block</span>
+        <span><span class="sw" style="background:var(--snt);"></span>SNT block</span>
+        <span><span class="sw" style="background:var(--red);"></span>Now</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Unscheduled Tasks</h2>
+      <div id="unscheduled-filters"></div>
+      <div id="unscheduled-table-wrap"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Plan Approval</h2>
+      <div id="plan-approval-body"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Freight Forecast</h2>
+      <div id="freight-list"></div>
+    </div>
+  `;
+
+  document.getElementById('h-weekly').onclick = ()=>{ state.horizon='weekly'; render(); };
+  document.getElementById('h-monthly').onclick = ()=>{ state.horizon='monthly'; render(); };
+
+  loadSection('corridor-chips', ()=>api('/api/timetable/top-corridors?limit=12'), (corridors)=>
+    corridors.map(c=>`<span class="chip" data-c="${escapeHtml(c.corridor_id)}">${escapeHtml(c.corridor_id)} &middot; ${c.segment_count} trains/wk</span>`).join(''),
+    {emptyMessage:'No corridors yet — load the timetable first.'}
+  ).then(()=>{
+    document.querySelectorAll('#corridor-chips .chip').forEach(chip=>{
+      chip.onclick = ()=>{
+        document.getElementById('derive-corridor').value = chip.dataset.c;
+        document.getElementById('tl-corridor').value = chip.dataset.c;
+      };
+    });
+  });
+
+  document.getElementById('load-tt-btn').onclick = async ()=>{
+    const el = document.getElementById('tt-result');
+    el.textContent = 'Loading real timetable dataset...';
+    try{
+      const r = await api('/api/data/load-timetable', {method:'POST'});
+      el.innerHTML = `Loaded <b>${r.segments_loaded}</b> real segments &middot; <b>${r.distinct_trains}</b> trains &middot;
+        <b>${r.distinct_corridors}</b> corridors &middot; <b>${r.stations_loaded}</b> stations.
+        Sample train numbers: ${r.sample_train_numbers.join(', ')}. Source: ${r.source}.`;
+      toast('Real timetable loaded', 'ok');
+      refreshHealthLamps();
+    }catch(e){ el.innerHTML = `<span class="row-errors">${escapeHtml(e.message)}</span>`; toast('Timetable load failed', 'err'); }
+  };
+
+  document.getElementById('derive-btn').onclick = async ()=>{
+    const corridor_id = document.getElementById('derive-corridor').value.trim();
+    const min_gap_hours = parseFloat(document.getElementById('derive-min-gap').value);
+    const el = document.getElementById('derive-result');
+    if(!corridor_id){ toast('Enter a corridor ID', 'err'); return; }
+    el.textContent = 'Deriving...';
+    try{
+      const r = await api('/api/corridor-availability/derive', {method:'POST', body:{corridor_id, horizon: state.horizon, min_gap_hours}});
+      el.innerHTML = `Found <b>${r.gaps_found}</b> genuine gap(s) against <b>${r.real_train_movements_considered}</b> real
+        train movements over ${r.horizon_days} days.` +
+        (r.slots[0] ? `<br/>Example: <span class="mono">${fmtDt(r.slots[0].start_time)} &rarr; ${fmtDt(r.slots[0].end_time)}</span>
+        (after train ${r.slots[0].preceding_train || 'horizon start'}, before train ${r.slots[0].following_train || 'horizon end'})` : '');
+      toast(`${r.gaps_found} slot(s) derived for ${corridor_id}`, 'ok');
+    }catch(e){ el.innerHTML = `<span class="row-errors">${escapeHtml(e.message)}</span>`; toast('Derive failed', 'err'); }
+  };
+
+  // ---- Run scheduler: staged progress feedback, button disabled while running ----
+  document.getElementById('run-btn').onclick = async ()=>{
+    const btn = document.getElementById('run-btn');
+    const el = document.getElementById('run-result');
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    const stages = ['Scoring tasks&hellip;', 'Building the constraint model&hellip;', 'Solving (may take up to 20s)&hellip;'];
+    let stageIdx = 0;
+    const startedAt = Date.now();
+    el.innerHTML = `<span class="mono" id="run-stage">${stages[0]}</span> <span class="mono small-muted" id="run-elapsed">0.0s</span>`;
+    const stageTimer = setInterval(()=>{
+      stageIdx = Math.min(stageIdx + 1, stages.length - 1);
+      const s = document.getElementById('run-stage'); if(s) s.innerHTML = stages[stageIdx];
+    }, 2200);
+    const elapsedTimer = setInterval(()=>{
+      const s = document.getElementById('run-elapsed'); if(s) s.textContent = ((Date.now()-startedAt)/1000).toFixed(1) + 's';
+    }, 150);
+    try{
+      const r = await api('/api/schedule/run?horizon=' + state.horizon, {method:'POST'});
+      el.innerHTML = `Plan <b>${r.plan_id}</b> (v${r.version}): <b>${r.metrics.scheduled_count}</b> scheduled,
+        <b>${r.metrics.unscheduled_count}</b> unscheduled, <b>${r.metrics.coordinated_blocks}</b> coordinated blocks,
+        engine <b>${r.metrics.engine_used}</b>, solved in ${r.metrics.solve_time_seconds}s.`;
+      toast(`Scheduler run complete &mdash; found ${r.metrics.coordinated_blocks} coordinated block(s)`, 'ok');
+      loadPlanDependentPanels();
+    }catch(e){
+      el.innerHTML = `<span class="row-errors">${escapeHtml(e.message)}</span>`;
+      toast('Scheduler run failed', 'err');
+    }finally{
+      clearInterval(stageTimer); clearInterval(elapsedTimer);
+      btn.disabled = false;
+      btn.removeAttribute('aria-busy');
+    }
+  };
+
+  document.getElementById('tl-render-btn').onclick = ()=>renderMainTimeline(document.getElementById('tl-corridor').value.trim());
+  document.getElementById('cmp-load-btn').onclick = ()=>loadComparison();
+
+  loadSection('freight-list', ()=>api('/api/freight-forecast'), (forecasts)=>`
+      <div class="table-wrap"><table><thead><tr><th>Corridor</th><th>Window</th><th>Expected Traffic</th></tr></thead>
+      <tbody>${forecasts.map(f=>`<tr><td class="mono">${f.corridor_id}</td><td class="mono">${fmtDt(f.forecast_window_start)} &rarr; ${fmtDt(f.forecast_window_end)}</td><td>${f.expected_goods_traffic}</td></tr>`).join('')}</tbody></table></div>
+    `, {emptyMessage: 'No freight forecast entries yet.'});
+
+  await loadPlanDependentPanels();
+  installCOAShortcuts();
+}
+
+/* Loads/refreshes every panel that depends on the current plan: metrics
+ * strip, unscheduled-tasks (filterable/sortable), plan approval + export,
+ * and (if a plan exists) the default corridor timeline. Called on initial
+ * COA render, after a scheduler run, and after a successful drag-reschedule
+ * — so every dependent panel stays in sync with the authoritative plan. */
+async function loadPlanDependentPanels(){
+  let plan;
+  try{
+    plan = await fetchCurrentPlanOrNull();
+  }catch(e){
+    const msg = `<div class="state-box error"><div class="state-icon">&#9888;</div><div class="state-msg">${escapeHtml(e.message)}</div><button class="btn secondary small" id="plan-panels-retry">Retry</button></div>`;
+    ['metrics-strip-wrap','unscheduled-table-wrap','plan-approval-body'].forEach(id=>{
+      const el = document.getElementById(id); if(el) el.innerHTML = msg;
+    });
+    document.querySelectorAll('#plan-panels-retry').forEach(b=>b.onclick = loadPlanDependentPanels);
+    return;
+  }
+
+  const metricsWrap = document.getElementById('metrics-strip-wrap');
+  if(metricsWrap){
+    metricsWrap.innerHTML = plan ? `
+      <div class="metrics-strip">
+        <div class="metric-cell good"><div class="val mono">${plan.metrics.scheduled_count}</div><div class="lbl">Scheduled</div></div>
+        <div class="metric-cell warn"><div class="val mono">${plan.metrics.unscheduled_count}</div><div class="lbl">Unscheduled</div></div>
+        <div class="metric-cell good"><div class="val mono">${plan.metrics.coordinated_blocks}</div><div class="lbl">Coordinated Blocks</div></div>
+        <div class="metric-cell"><div class="val mono">${plan.metrics.solve_time_seconds}s</div><div class="lbl">Solve Time</div></div>
+        <div class="metric-cell"><div class="val mono" style="font-size:13px;">${plan.metrics.engine_used}</div><div class="lbl">Engine</div></div>
+      </div>` : '';
+  }
+
+  const unschedWrap = document.getElementById('unscheduled-table-wrap');
+  const unschedFilters = document.getElementById('unscheduled-filters');
+  if(unschedWrap){
+    if(!plan){
+      unschedFilters.innerHTML = '';
+      unschedWrap.innerHTML = `<div class="state-box"><div class="state-icon">&#9675;</div><div class="state-msg">No plan yet.</div><div class="state-hint">Run the scheduler above to produce one.</div></div>`;
+    } else if(!plan.unscheduled.length){
+      unschedFilters.innerHTML = '';
+      unschedWrap.innerHTML = `<div class="state-box"><div class="state-icon">&#10003;</div><div class="state-msg">None &mdash; everything fit.</div></div>`;
+    } else {
+      renderFilterBar('unscheduled-filters', plan.unscheduled, {showDepartment:true}, (rows)=>{
+        renderSortableTable('unscheduled-table-wrap', rows, {
+          rowKey: r=>r.task_id, defaultSortKey: 'priority_score', searchFields: ['task_id','corridor_id','reason'],
+          emptyMessage: 'No unscheduled tasks match the current filters.',
+          columns: [
+            {key:'task_id', label:'Task', sortable:true, render:u=>`<span class="mono">${escapeHtml(u.task_id)}</span>`},
+            {key:'department', label:'Dept', sortable:true, render:u=>`<span class="badge dept-${u.department}">${u.department}</span>`},
+            {key:'corridor_id', label:'Corridor', sortable:true, render:u=>`<span class="mono">${escapeHtml(u.corridor_id)}</span>`},
+            {key:'priority_score', label:'Score', sortable:true, render:u=>`<span class="mono" style="color:${TIER_COLOR[priorityTier(u.priority_score)]}">${u.priority_score.toFixed(1)}</span>`},
+            {key:'reason', label:'Reason', render:u=>escapeHtml(u.reason)},
+          ],
+        });
+      });
+    }
+  }
+
+  const approvalWrap = document.getElementById('plan-approval-body');
+  if(approvalWrap){
+    if(!plan){
+      approvalWrap.innerHTML = `<p class="small-muted">Run the scheduler first.</p>`;
+    } else {
+      approvalWrap.innerHTML = `
+        <p>Plan <span class="accent mono">${plan.plan_id}</span> &middot; Status: <span class="badge ${plan.status}">${plan.status}</span> &middot; version <span class="mono">${plan.version}</span>
+        ${plan.approved_by ? `&middot; approved by <span class="mono">${plan.approved_by}</span> at <span class="mono">${fmtDt(plan.approved_at)}</span>` : ''}</p>
+        <div class="btn-row">
+          ${plan.status === 'draft' ? `
+            <button class="btn" id="approve-btn">Approve &amp; Publish <kbd style="font-family:var(--mono);background:#04181a;padding:1px 5px;border-radius:3px;margin-left:4px;">A</kbd></button>
+            <button class="btn danger" id="reject-btn">Reject</button>
+          ` : `<span class="small-muted">Only a draft plan can be approved or rejected. Run the scheduler to produce a new draft.</span>`}
+        </div>
+        <div class="btn-row">
+          <button class="btn secondary small" id="export-csv-btn">Export CSV</button>
+          <button class="btn secondary small" id="export-pdf-btn">Export PDF</button>
+        </div>
+      `;
+      if(plan.status === 'draft'){
+        document.getElementById('approve-btn').onclick = async ()=>{
+          const ok = await confirmDialog({
+            title: 'Publish this plan?',
+            danger: false, confirmLabel: 'Publish Plan',
+            bodyHtml: `
+              <p>This publishes <b>${escapeHtml(plan.plan_id)}</b> for the <b>${state.horizon}</b> horizon to
+              every department's dashboard immediately, and supersedes whatever is currently published for this horizon.</p>
+              <div class="summary-line"><span>Scheduled tasks</span><span class="mono">${plan.metrics.scheduled_count}</span></div>
+              <div class="summary-line"><span>Coordinated blocks</span><span class="mono">${plan.metrics.coordinated_blocks}</span></div>
+              <div class="summary-line"><span>Unscheduled tasks</span><span class="mono">${plan.metrics.unscheduled_count}</span></div>
+            `,
+          });
+          if(ok) decidePlan(plan.plan_id, 'approve');
+        };
+        document.getElementById('reject-btn').onclick = async ()=>{
+          const ok = await confirmDialog({
+            title: 'Reject this draft?',
+            danger: true, confirmLabel: 'Reject Draft',
+            bodyHtml: `<p>This discards draft <b>${escapeHtml(plan.plan_id)}</b> permanently. You would need to run the scheduler again to produce a new one.</p>`,
+          });
+          if(ok) decidePlan(plan.plan_id, 'reject');
+        };
+      }
+      document.getElementById('export-csv-btn').onclick = ()=>exportPlan('csv');
+      document.getElementById('export-pdf-btn').onclick = ()=>exportPlan('pdf');
+    }
+  }
+
+  if(plan && plan.entries.length && !tlState.corridorId){
+    document.getElementById('tl-corridor').value = plan.entries[0].corridor_id;
+    renderMainTimeline(plan.entries[0].corridor_id);
+  }
+  if(plan) loadComparison();
+}
+
+async function exportPlan(format){
+  try{
+    const res = await fetch(`/api/schedule/plan/export?horizon=${encodeURIComponent(state.horizon)}&format=${format}`, {
+      headers: {'Authorization': 'Bearer ' + state.accessToken},
+    });
+    if(res.status === 401){ handleSessionExpired(); throw new Error('Session expired — please log in again.'); }
+    if(!res.ok){ const j = await res.json().catch(()=>({})); throw new Error(j.detail || ('HTTP ' + res.status)); }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `abps_plan_${state.horizon}.${format}`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 4000);
+    toast(`Exported plan as ${format.toUpperCase()}`, 'ok');
+  }catch(e){ toast('Export failed: ' + e.message, 'err'); }
+}
+
+/* ---------- keyboard shortcuts (Control Office view) ---------- */
+function installCOAShortcuts(){
+  if(_coaKeyHandler) document.removeEventListener('keydown', _coaKeyHandler);
+  _coaKeyHandler = (ev)=>{
+    if(!state.currentUser || state.currentUser.role !== 'COA') return;
+    const tag = (ev.target && ev.target.tagName || '').toLowerCase();
+    if(tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    if(ev.key === '?'){ ev.preventDefault(); showShortcutsOverlay(); return; }
+    if(ev.key.toLowerCase() === 'r'){
+      const btn = document.getElementById('run-btn');
+      if(btn && !btn.disabled){ ev.preventDefault(); btn.click(); }
+    }
+    if(ev.key.toLowerCase() === 'a'){
+      const btn = document.getElementById('approve-btn');
+      if(btn){ ev.preventDefault(); btn.click(); }
+    }
+  };
+  document.addEventListener('keydown', _coaKeyHandler);
+}
+function showShortcutsOverlay(){
+  confirmDialog({
+    title: 'Keyboard Shortcuts',
+    confirmLabel: 'Close', cancelLabel: 'Close',
+    bodyHtml: `<table class="shortcuts-table">
+      <tr><td><kbd>R</kbd></td><td>Run the scheduler</td></tr>
+      <tr><td><kbd>A</kbd></td><td>Approve &amp; publish the current draft</td></tr>
+      <tr><td><kbd>?</kbd></td><td>Show this shortcuts overlay</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>Close any open dialog</td></tr>
+      <tr><td><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd></td><td>Move between fields and buttons</td></tr>
+    </table>`,
+  });
+}
+
+async function loadComparison(){
+  const body = document.getElementById('cmp-body');
+  if(!body) return;
+  body.innerHTML = `<div class="skeleton-line w80"></div><div class="skeleton-line w60"></div>`;
+
+  let cmp;
+  try{
+    cmp = await api('/api/schedule/comparison?horizon=' + state.horizon);
+  }catch(e){
+    body.innerHTML = `
+      <div class="state-box error"><div class="state-icon">&#9888;</div>
+      <div class="state-msg">${escapeHtml(e.message)}</div>
+      <button class="btn secondary small" id="cmp-retry-btn">Retry</button></div>`;
+    document.getElementById('cmp-retry-btn').onclick = loadComparison;
+    return;
+  }
+
+  const LOWER_BETTER = new Set(['total_corridor_closures', 'total_downtime_hours']);
+  const HIGHER_BETTER = new Set(['tasks_completed', 'priority_weighted_completion', 'block_utilization_pct', 'coordinated_blocks']);
+  const LABELS = {
+    tasks_completed: 'Tasks Completed',
+    total_corridor_closures: 'Corridor Closures',
+    total_downtime_hours: 'Downtime Hours',
+    priority_weighted_completion: 'Priority-Weighted Completion',
+    block_utilization_pct: 'Block Utilization %',
+    coordinated_blocks: 'Coordinated Blocks',
+    avg_overdue_days_of_scheduled_tasks: 'Avg Overdue Days (scheduled)',
+    tasks_total: 'Total Tasks Considered',
+  };
+  const ORDER = ['tasks_completed', 'total_corridor_closures', 'total_downtime_hours', 'priority_weighted_completion',
+    'block_utilization_pct', 'coordinated_blocks', 'avg_overdue_days_of_scheduled_tasks', 'tasks_total'];
+
+  function deltaClass(key, abs){
+    if(!abs) return 'delta-neutral';
+    if(LOWER_BETTER.has(key)) return abs < 0 ? 'delta-good' : 'delta-bad';
+    if(HIGHER_BETTER.has(key)) return abs > 0 ? 'delta-good' : 'delta-bad';
+    return 'delta-neutral';
+  }
+
+  const closuresAvoided = cmp.baseline.total_corridor_closures - cmp.optimized.total_corridor_closures;
+  const downtimeSaved = cmp.baseline.total_downtime_hours - cmp.optimized.total_downtime_hours;
+  const defaultCorridor = (cmp.baseline_entries[0] && cmp.baseline_entries[0].corridor_id) || document.getElementById('tl-corridor')?.value || 'THK-KYN';
+
+  body.innerHTML = `
+    <div class="metrics-strip" style="margin-top:14px;">
+      <div class="metric-cell ${closuresAvoided >= 0 ? 'good' : 'warn'}"><div class="val mono">${closuresAvoided >= 0 ? closuresAvoided : 0}</div><div class="lbl">Corridor Closures Avoided</div></div>
+      <div class="metric-cell ${downtimeSaved >= 0 ? 'good' : 'warn'}"><div class="val mono">${downtimeSaved.toFixed(1)}h</div><div class="lbl">Downtime Hours Saved</div></div>
+      <div class="metric-cell"><div class="val mono">${cmp.baseline.tasks_completed} &rarr; ${cmp.optimized.tasks_completed}</div><div class="lbl">Tasks Completed (Before &rarr; After)</div></div>
+      <div class="metric-cell"><div class="val mono">${cmp.baseline.coordinated_blocks} &rarr; ${cmp.optimized.coordinated_blocks}</div><div class="lbl">Coordinated Blocks (Before &rarr; After)</div></div>
+    </div>
+    <div class="table-wrap" style="max-height:none;">
+      <table>
+        <thead><tr><th>Metric</th><th>Before (Manual)</th><th>After (ABPS)</th><th>Delta</th></tr></thead>
+        <tbody>
+          ${ORDER.map(key=>{
+            const b = cmp.baseline[key];
+            const o = cmp.optimized[key];
+            const d = cmp.delta[key];
+            const cls = deltaClass(key, d.absolute);
+            const sign = d.absolute > 0 ? '+' : '';
+            return `<tr>
+              <td>${LABELS[key]}</td>
+              <td class="mono">${b}</td>
+              <td class="mono">${o}</td>
+              <td class="mono ${cls}">${sign}${d.absolute} (${sign}${d.percent}%)</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div style="margin-top:16px;">
+      <h2 style="margin-bottom:8px;">Corridor Timeline &mdash; Before vs After</h2>
+      <div class="corridor-picker">
+        <div>
+          <label>Corridor to visualize</label>
+          <input type="text" id="cmp-corridor" placeholder="e.g. THK-KYN" value="${escapeHtml(defaultCorridor)}" />
+        </div>
+        <div style="flex:none;"><button class="btn secondary" id="cmp-tl-render-btn" style="margin-top:0;">Render</button></div>
+      </div>
+      <div style="margin-top:10px;">
+        <div class="small-muted" style="margin-bottom:4px;">BASELINE &mdash; manual process (before)</div>
+        <div id="cmp-timeline-baseline"></div>
+        <div class="small-muted" style="margin:12px 0 4px 0;">OPTIMIZED &mdash; ABPS (after)</div>
+        <div id="cmp-timeline-optimized"></div>
+      </div>
+    </div>
+  `;
+
+  const corridorInput = document.getElementById('cmp-corridor');
+  document.getElementById('cmp-tl-render-btn').onclick = () => renderComparisonTimelines(corridorInput.value.trim(), cmp);
+  renderComparisonTimelines(defaultCorridor, cmp);
+}
+
+async function decidePlan(plan_id, decision){
+  try{
+    await api('/api/schedule/approve', {method:'POST', body:{plan_id, decision}});
+    toast(`Plan ${decision === 'approve' ? 'approved & published' : 'rejected'}`, 'ok');
+    loadPlanDependentPanels();
+  }catch(e){ toast('Failed: ' + e.message, 'err'); }
+}
+
+// The backend sends naive datetime strings ("2026-09-12T02:00:00" or
+// "2026-09-12 02:00:00", no timezone) that are meant as UTC throughout this
+// app (every other UTC*-based computation here assumes it). Handing a
+// string like that straight to `new Date(...)` makes the JS engine parse it
+// as LOCAL time instead — on a non-UTC machine that silently shifts every
+// block by hours and sometimes onto the wrong calendar day, which can push
+// it clean out of the visible date range. This is the one, single place
+// that parses a server datetime string, specifically so that mistake can't
+// recur: always append 'Z' unless one (or another offset) is already there.
+function parseServerDt(s){
+  const iso = String(s).replace(' ', 'T');
+  return new Date(/[Zz]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z');
+}
+
+function _tlMinutesOfDay(iso){
+  const t = parseServerDt(iso);
+  return t.getUTCHours()*60 + t.getUTCMinutes();
+}
+function _tlPct(mins){ return (mins/1440*100).toFixed(2) + '%'; }
+
+// Shared renderer: real trains (background layer) + available slots + a set
+// of scheduled entries, positioned and sized by their REAL assigned times
+// (not the enclosing window's times) so multiple tasks packed into one
+// window visibly sit at different offsets. Used both by the main Corridor
+// Timeline panel and by the Before/After dual timeline.
+function buildTimelineDaysHtml(corridorId, templates, slots, entries, horizonDays){
+  const today = new Date(); today.setUTCHours(0,0,0,0);
+  const days = [];
+  for(let i=0;i<Math.min(horizonDays,14);i++){
+    days.push(new Date(today.getTime() + i*86400000));
+  }
+
+  let html = '';
+  days.forEach(day=>{
+    const dayStr = day.toISOString().slice(0,10);
+    let inner = '<div class="timeline-hour-grid">' + Array.from({length:24}).map(()=>'<div></div>').join('') + '</div>';
+
+    templates.forEach(t=>{
+      const startMin = _tlMinutesOfDay(t.scheduled_departure);
+      let durMin = (parseServerDt(t.scheduled_arrival) - parseServerDt(t.scheduled_departure)) / 60000;
+      if(durMin <= 0) durMin = 5;
+      const widthPct = Math.max(0.3, (durMin/1440*100));
+      inner += `<div class="tl-train" style="left:${_tlPct(startMin)};width:${widthPct}%;" title="Train ${t.train_id} ${t.train_name}: dep ${t.scheduled_departure.slice(11,16)}"></div>`;
+    });
+
+    slots.forEach(s=>{
+      const sStart = parseServerDt(s.start_time);
+      if(sStart.toISOString().slice(0,10) !== dayStr) return;
+      const startMin = sStart.getUTCHours()*60 + sStart.getUTCMinutes();
+      const widthPct = Math.max(0.3, (s.duration_hours*60/1440*100));
+      inner += `<div class="tl-slot" style="left:${_tlPct(startMin)};width:${widthPct}%;" title="Available slot ${s.slot_id}: ${s.duration_hours}h (${s.derived_from})"></div>`;
+    });
+
+    entries.filter(e=>e.corridor_id===corridorId).forEach(e=>{
+      const eStart = parseServerDt(e.assigned_window_start);
+      if(eStart.toISOString().slice(0,10) !== dayStr) return;
+      const startMin = eStart.getUTCHours()*60 + eStart.getUTCMinutes();
+      const durMin = (parseServerDt(e.assigned_window_end) - eStart) / 60000;
+      const widthPct = Math.max(0.4, (durMin/1440*100));
+      const shared = e.co_scheduled_departments && e.co_scheduled_departments.length;
+      inner += `<div class="tl-block dept-${e.department}" style="left:${_tlPct(startMin)};width:${widthPct}%;" title="${e.task_id} (${e.department}) ${e.assigned_window_start} - ${e.assigned_window_end}${shared ? ' | shared with '+e.co_scheduled_departments.join(',') : ''}"></div>`;
+    });
+
+    html += `<div class="timeline-day"><div class="timeline-day-label">${dayStr}</div><div class="timeline-track">${inner}</div></div>`;
+  });
+  return html;
+}
+
+/* ============================== main corridor timeline (interactive) ==============================
+ * FR-COA-03: click a block for full task detail; drag a block to adjust its
+ * time (COA + draft plan only, backend re-validates and rejects invalid
+ * moves with a specific reason, and a rejected drag snaps back); zoom
+ * between day/week/month granularity with prev/next paging; a live "now"
+ * marker. Real train movements render as the background layer (unchanged
+ * from before) so it stays visible that every block sits in a genuine gap. */
+const tlState = {corridorId: '', granularity: 'week', dayOffset: 0, templates: [], slots: [], entries: [], planStatus: null, selectedKey: null};
+
+function computeTimelineDays(granularity, dayOffset){
+  const today = new Date(); today.setUTCHours(0,0,0,0);
+  const count = granularity === 'day' ? 1 : (granularity === 'month' ? 30 : 7);
+  const start = new Date(today.getTime() + dayOffset * count * 86400000);
+  const days = [];
+  for(let i=0;i<count;i++) days.push(new Date(start.getTime() + i*86400000));
+  return days;
+}
+
+function entryKey(e){ return e.id != null ? ('id:'+e.id) : ('tk:'+e.task_id+':'+e.assigned_window_start); }
+
+function detailPanelHtml(entry){
+  if(!entry){
+    return `<h4>Block Details</h4><p class="small-muted">Click (or focus + Enter) a block on the timeline to see its task, priority score, full justification, and which departments share that window.</p>`;
+  }
+  const shared = entry.co_scheduled_departments || [];
+  return `
+    <h4 class="mono">${escapeHtml(entry.task_id)}</h4>
+    <div class="dp-row"><div class="dp-label">Department</div><span class="badge dept-${entry.department}">${entry.department}</span></div>
+    <div class="dp-row"><div class="dp-label">Corridor</div><span class="mono">${escapeHtml(entry.corridor_id)}</span></div>
+    <div class="dp-row"><div class="dp-label">Window</div><span class="mono">${fmtDt(entry.assigned_window_start)}<br/>&rarr; ${fmtDt(entry.assigned_window_end)}</span></div>
+    ${entry.priority_score != null ? `<div class="dp-row"><div class="dp-label">Priority Score</div><span class="score-pill mono" style="color:${TIER_COLOR[priorityTier(entry.priority_score)]}">${entry.priority_score.toFixed(1)}</span> <span class="small-muted">${priorityTier(entry.priority_score)}</span></div>` : ''}
+    ${entry.priority_reason ? `<div class="dp-row"><div class="dp-label">Justification</div><div class="justification">${escapeHtml(entry.priority_reason)}</div></div>` : ''}
+    <div class="dp-row"><div class="dp-label">Shared With</div>${shared.length ? shared.map(d=>`<span class="badge dept-${d}">${d}</span>`).join(' ') : '<span class="small-muted">Solo block</span>'}</div>
+    ${entry.id != null ? `<div class="dp-row"><div class="dp-label">Adjust</div><p class="small-muted" style="margin:0;">${state.currentUser.role==='COA' && tlState.planStatus==='draft' ? 'Drag this block left/right to change its time. Every move is re-validated against real trains, corridor capacity, and mutual exclusion — an invalid move snaps back with the reason.' : 'Only the Control Office can adjust a block, and only while its plan is still a draft.'}</p></div>` : ''}
+  `;
+}
+
+function buildInteractiveTimelineHtml(days){
+  const now = new Date();
+  const nowDayStr = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString().slice(0,10);
+  const nowMinutes = now.getUTCHours()*60 + now.getUTCMinutes();
+  const canDrag = state.currentUser.role === 'COA' && tlState.planStatus === 'draft';
+
+  let html = '';
+  days.forEach(day=>{
+    const dayStr = day.toISOString().slice(0,10);
+    let inner = '<div class="timeline-hour-grid">' + Array.from({length:24}).map(()=>'<div></div>').join('') + '</div>';
+
+    tlState.templates.forEach(t=>{
+      const startMin = _tlMinutesOfDay(t.scheduled_departure);
+      let durMin = (parseServerDt(t.scheduled_arrival) - parseServerDt(t.scheduled_departure)) / 60000;
+      if(durMin <= 0) durMin = 5;
+      const widthPct = Math.max(0.3, (durMin/1440*100));
+      inner += `<div class="tl-train" style="left:${_tlPct(startMin)};width:${widthPct}%;" title="Train ${t.train_id} ${t.train_name}: dep ${t.scheduled_departure.slice(11,16)}"></div>`;
+    });
+
+    tlState.slots.forEach(s=>{
+      const sStart = parseServerDt(s.start_time);
+      if(sStart.toISOString().slice(0,10) !== dayStr) return;
+      const startMin = sStart.getUTCHours()*60 + sStart.getUTCMinutes();
+      const widthPct = Math.max(0.3, (s.duration_hours*60/1440*100));
+      inner += `<div class="tl-slot" style="left:${_tlPct(startMin)};width:${widthPct}%;" title="Available slot ${s.slot_id}: ${s.duration_hours}h (${s.derived_from})"></div>`;
+    });
+
+    tlState.entries.filter(e=>e.corridor_id===tlState.corridorId).forEach(e=>{
+      const eStart = parseServerDt(e.assigned_window_start);
+      if(eStart.toISOString().slice(0,10) !== dayStr) return;
+      const startMin = eStart.getUTCHours()*60 + eStart.getUTCMinutes();
+      const durMin = (parseServerDt(e.assigned_window_end) - eStart) / 60000;
+      const widthPct = Math.max(0.4, (durMin/1440*100));
+      const shared = e.co_scheduled_departments && e.co_scheduled_departments.length;
+      const key = entryKey(e);
+      const label = `${e.task_id} (${e.department}) ${e.assigned_window_start} to ${e.assigned_window_end}${shared ? ', shared with '+e.co_scheduled_departments.join(', ') : ''}`;
+      inner += `<div class="tl-block dept-${e.department}${tlState.selectedKey===key?' selected':''}" style="left:${_tlPct(startMin)};width:${widthPct}%;"
+        data-key="${escapeHtml(key)}" data-day="${dayStr}" ${e.id!=null && canDrag ? '' : 'style="cursor:pointer;"'}
+        role="button" tabindex="0" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"></div>`;
+    });
+
+    if(dayStr === nowDayStr){
+      inner += `<div class="tl-now-marker" style="left:${_tlPct(nowMinutes)};" aria-hidden="true"></div>`;
+    }
+
+    html += `<div class="timeline-day"><div class="timeline-day-label">${dayStr}</div><div class="timeline-track">${inner}</div></div>`;
+  });
+  return html;
+}
+
+async function renderMainTimeline(corridorId){
+  const body = document.getElementById('timeline-body');
+  if(!corridorId){ body.innerHTML = '<div class="small-muted">Enter a corridor ID.</div>'; return; }
+  body.innerHTML = `<div class="skeleton-line w80"></div><div class="skeleton-line w60"></div><div class="skeleton-line w40"></div>`;
+
+  let templates, slots, plan;
+  try{
+    templates = await api('/api/timetable?corridor_id=' + encodeURIComponent(corridorId) + '&limit=2000');
+    slots = await api('/api/corridor-availability?corridor_id=' + encodeURIComponent(corridorId) + '&horizon=' + state.horizon);
+    plan = await fetchCurrentPlanOrNull();
+  }catch(e){
+    body.innerHTML = `
+      <div class="state-box error"><div class="state-icon">&#9888;</div>
+      <div class="state-msg">${escapeHtml(e.message)}</div>
+      <button class="btn secondary small" id="tl-retry-btn">Retry</button></div>`;
+    document.getElementById('tl-retry-btn').onclick = ()=>renderMainTimeline(corridorId);
+    return;
+  }
+
+  if(!templates.length){
+    body.innerHTML = `
+      <div class="state-box"><div class="state-icon">&#9675;</div>
+      <div class="state-msg">No timetable entries for corridor "${escapeHtml(corridorId)}".</div>
+      <div class="state-hint">Load the timetable and check the spelling — see the corridor chips above.</div></div>`;
+    return;
+  }
+
+  tlState.corridorId = corridorId;
+  tlState.templates = templates;
+  tlState.slots = slots;
+  tlState.entries = plan ? plan.entries : [];
+  tlState.planStatus = plan ? plan.status : null;
+  drawMainTimeline();
+}
+
+function drawMainTimeline(){
+  const body = document.getElementById('timeline-body');
+  const days = computeTimelineDays(tlState.granularity, tlState.dayOffset);
+  const selected = tlState.entries.find(e=>entryKey(e)===tlState.selectedKey) || null;
+
+  body.innerHTML = `
+    <div class="tl-toolbar">
+      <div class="tl-zoom-group" role="group" aria-label="Timeline granularity">
+        ${['day','week','month'].map(g=>`<button type="button" class="btn secondary small ${tlState.granularity===g?'active':''}" data-gran="${g}">${g[0].toUpperCase()+g.slice(1)}</button>`).join('')}
+      </div>
+      <div class="btn-row" style="margin-top:0;">
+        <button type="button" class="btn secondary small" id="tl-prev">&larr; Earlier</button>
+        <button type="button" class="btn secondary small" id="tl-today">Today</button>
+        <button type="button" class="btn secondary small" id="tl-next">Later &rarr;</button>
+      </div>
+    </div>
+    <div class="timeline-split">
+      <div class="tl-main">
+        <div id="tl-days"></div>
+      </div>
+      <div class="tl-detail-panel" id="tl-detail" aria-live="polite">${detailPanelHtml(selected)}</div>
+    </div>
+  `;
+  document.getElementById('tl-days').innerHTML = buildInteractiveTimelineHtml(days);
+
+  document.querySelectorAll('[data-gran]').forEach(btn=>{
+    btn.onclick = ()=>{ tlState.granularity = btn.dataset.gran; tlState.dayOffset = 0; drawMainTimeline(); };
+  });
+  document.getElementById('tl-prev').onclick = ()=>{ tlState.dayOffset -= 1; drawMainTimeline(); };
+  document.getElementById('tl-next').onclick = ()=>{ tlState.dayOffset += 1; drawMainTimeline(); };
+  document.getElementById('tl-today').onclick = ()=>{ tlState.dayOffset = 0; drawMainTimeline(); };
+
+  const canDrag = state.currentUser.role === 'COA' && tlState.planStatus === 'draft';
+  document.querySelectorAll('#tl-days .tl-block').forEach(blockEl=>{
+    const key = blockEl.dataset.key;
+    const entry = tlState.entries.find(e=>entryKey(e)===key);
+    if(!entry) return;
+
+    function select(){ tlState.selectedKey = key; document.getElementById('tl-detail').innerHTML = detailPanelHtml(entry); document.querySelectorAll('#tl-days .tl-block.selected').forEach(b=>b.classList.remove('selected')); blockEl.classList.add('selected'); }
+    blockEl.addEventListener('click', select);
+    blockEl.addEventListener('keydown', (ev)=>{ if(ev.key==='Enter' || ev.key===' '){ ev.preventDefault(); select(); } });
+
+    if(canDrag && entry.id != null){
+      wireBlockDrag(blockEl, entry);
+    }
+  });
+}
+
+function wireBlockDrag(blockEl, entry){
+  let dragging = false, startX = 0, startLeftPct = 0, trackWidth = 0;
+  const track = blockEl.closest('.timeline-track');
+
+  blockEl.addEventListener('pointerdown', (ev)=>{
+    if(ev.button !== 0) return;
+    dragging = true;
+    blockEl.setPointerCapture(ev.pointerId);
+    blockEl.classList.add('dragging');
+    startX = ev.clientX;
+    trackWidth = track.getBoundingClientRect().width;
+    startLeftPct = parseFloat(blockEl.style.left);
+  });
+  blockEl.addEventListener('pointermove', (ev)=>{
+    if(!dragging) return;
+    const deltaPct = ((ev.clientX - startX) / trackWidth) * 100;
+    const widthPct = parseFloat(blockEl.style.width);
+    const newLeftPct = Math.max(0, Math.min(100 - widthPct, startLeftPct + deltaPct));
+    blockEl.style.left = newLeftPct + '%';
+  });
+  blockEl.addEventListener('pointerup', async (ev)=>{
+    if(!dragging) return;
+    dragging = false;
+    blockEl.classList.remove('dragging');
+    try{ blockEl.releasePointerCapture(ev.pointerId); }catch(_e){}
+
+    const newLeftPct = parseFloat(blockEl.style.left);
+    const newStartMin = Math.round((newLeftPct/100) * 1440 / 5) * 5; // snap to 5 minutes
+    const dayStr = blockEl.dataset.day;
+    if(Math.round(startLeftPct*100) === Math.round(newLeftPct*100)) return; // no real move — don't call the API for a click-release
+
+    const newStart = new Date(dayStr + 'T00:00:00Z');
+    newStart.setUTCMinutes(newStartMin);
+    const isoLocal = newStart.toISOString().slice(0,19);
+
+    try{
+      const result = await api(`/api/schedule/entries/${entry.id}/reschedule`, {method:'POST', body:{new_start: isoLocal}});
+      toast(`Block moved to ${fmtDt(result.assigned_window_start)}`, 'ok');
+      await renderMainTimeline(tlState.corridorId); // redraw from authoritative server state
+      loadPlanDependentPanels(); // metrics/unscheduled/plan-approval all depend on the plan too
+    }catch(e){
+      toast('Move rejected — snapped back: ' + e.message, 'err');
+      drawMainTimeline(); // snap back: redraw from the last-known-good (unmutated) tlState
+    }
+  });
+}
+
+async function renderComparisonTimelines(corridorId, comparison){
+  const baseWrap = document.getElementById('cmp-timeline-baseline');
+  const optWrap = document.getElementById('cmp-timeline-optimized');
+  if(!baseWrap || !optWrap) return;
+  if(!corridorId){
+    baseWrap.innerHTML = optWrap.innerHTML = '<div class="small-muted">Enter a corridor ID.</div>';
+    return;
+  }
+  baseWrap.innerHTML = optWrap.innerHTML = '<div class="small-muted">Loading...</div>';
+  const horizonDays = state.horizon === 'monthly' ? 30 : 7;
+
+  let templates = [], slots = [], plan = null;
+  try{
+    templates = await api('/api/timetable?corridor_id=' + encodeURIComponent(corridorId) + '&limit=2000');
+    slots = await api('/api/corridor-availability?corridor_id=' + encodeURIComponent(corridorId) + '&horizon=' + state.horizon);
+    plan = await api('/api/schedule/plan?horizon=' + state.horizon).catch(()=>null);
+  }catch(e){
+    baseWrap.innerHTML = optWrap.innerHTML = `<div class="row-errors">${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  if(!templates.length){
+    const msg = `<div class="small-muted">No timetable entries for corridor "${escapeHtml(corridorId)}".</div>`;
+    baseWrap.innerHTML = optWrap.innerHTML = msg;
+    return;
+  }
+
+  // baseline_entries use {start,end}; reshape to the {assigned_window_start,
+  // assigned_window_end, co_scheduled_departments} field names the shared
+  // renderer expects. Baseline coordination is always empty by construction
+  // (whole-window exclusive claim), which the timeline will visibly show as
+  // one solid single-department block per window versus the optimized
+  // timeline's tightly packed, multi-department blocks below it.
+  const baselineEntries = (comparison.baseline_entries || []).map(e => ({
+    task_id: e.task_id, department: e.department, corridor_id: e.corridor_id,
+    assigned_window_start: e.start, assigned_window_end: e.end, co_scheduled_departments: [],
+  }));
+  const optimizedEntries = plan ? plan.entries : [];
+
+  baseWrap.innerHTML = buildTimelineDaysHtml(corridorId, templates, slots, baselineEntries, horizonDays);
+  optWrap.innerHTML = buildTimelineDaysHtml(corridorId, templates, slots, optimizedEntries, horizonDays);
+}
+
+/* ============================== ADMIN VIEW ============================== */
+const WEIGHT_META = {
+  w_severity: 'Points per severity point (1-5)',
+  w_overdue: 'Points per overdue day (capped at 60 days)',
+  w_criticality: 'Points per asset criticality point (1-5)',
+  w_safety_flag: 'Flat bonus if safety-critical or interlocking-critical',
+};
+
+async function renderAdmin(content){
+  content.innerHTML = `
+    <div class="grid-2">
+      <div class="panel">
+        <h2>Scoring Weights</h2>
+        <p class="hint">score = w_severity&times;severity + w_overdue&times;min(overdue,60) + w_criticality&times;criticality + w_safety_flag (if flagged).
+        Changing a weight immediately rescores every task in the system.</p>
+        <div id="weights-form"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Asset Criticality Registry</h2>
+        <p class="hint">Assets not listed here default to criticality 3/5 when scored. CSV import requires the asset_id to be registered here first.</p>
+        <form id="asset-form" class="btn-row" style="margin-top:0;align-items:flex-end;">
+          <div style="flex:1;"><label for="asset-form-id">Asset ID</label><input type="text" id="asset-form-id" name="asset_id" required /></div>
+          <div style="width:100px;"><label for="asset-form-crit">Criticality</label><input type="number" id="asset-form-crit" name="criticality" min="1" max="5" value="3" required /></div>
+          <button class="btn" type="submit">Set</button>
+        </form>
+        <div id="asset-registry" style="margin-top:12px;"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Users</h2>
+      <div id="users-table"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Full Audit Trail</h2>
+      <div id="audit-table"></div>
+    </div>
+  `;
+
+  async function loadWeights(){
+    return loadSection('weights-form', ()=>api('/api/admin/scoring-config'), (weights)=>
+      Object.keys(WEIGHT_META).map(k=>`
+        <div class="weight-row">
+          <label for="w-${k}">${k}</label>
+          <input type="number" step="0.1" id="w-${k}" value="${weights[k]}" />
+          <span class="desc">${WEIGHT_META[k]}</span>
+        </div>
+      `).join('') + '<div class="btn-row"><button class="btn" id="save-weights-btn">Save &amp; Rescore</button></div>',
+      {
+        isEmpty: ()=>false,
+        afterRender: ()=>{
+          document.getElementById('save-weights-btn').onclick = async ()=>{
+            try{
+              for(const k of Object.keys(WEIGHT_META)){
+                const val = parseFloat(document.getElementById('w-'+k).value);
+                await api('/api/admin/scoring-config', {method:'POST', body:{key:k, value:val}});
+              }
+              toast('Weights saved, all tasks rescored', 'ok');
+            }catch(e){ toast('Failed: ' + e.message, 'err'); }
+          };
+        },
+      }
+    );
+  }
+
+  // renderSortableTable draws directly into its container, which doesn't fit
+  // loadSection's "return HTML string" contract — so this loader is hand-rolled
+  // (skeleton / error+retry / empty / real table) rather than going through it.
+  async function loadAssetsReal(){
+    const el = document.getElementById('asset-registry');
+    el.innerHTML = `<div class="skeleton-line w60"></div><div class="skeleton-line w40"></div>`;
+    let assets;
+    try{ assets = await api('/api/admin/asset-criticality'); }
+    catch(e){
+      el.innerHTML = `<div class="state-box error"><div class="state-icon">&#9888;</div><div class="state-msg">${escapeHtml(e.message)}</div><button class="btn secondary small" id="asset-retry">Retry</button></div>`;
+      document.getElementById('asset-retry').onclick = loadAssetsReal;
+      return;
+    }
+    if(!assets.length){
+      el.innerHTML = `<div class="state-box"><div class="state-icon">&#9675;</div><div class="state-msg">No assets registered yet.</div><div class="state-hint">Register one with the form above.</div></div>`;
+      return;
+    }
+    renderSortableTable('asset-registry', assets, {
+      rowKey: a=>a.asset_id, defaultSortKey: 'asset_id', searchFields: ['asset_id'], pageSize: 15,
+      emptyMessage: 'No assets match the search.',
+      columns: [
+        {key:'asset_id', label:'Asset ID', sortable:true, render:a=>`<span class="mono">${escapeHtml(a.asset_id)}</span>`},
+        {key:'criticality', label:'Criticality', sortable:true, render:a=>`<span class="mono">${a.criticality}/5</span>`},
+      ],
+    });
+  }
+
+  async function loadUsers(){
+    const el = document.getElementById('users-table');
+    el.innerHTML = `<div class="skeleton-line w80"></div><div class="skeleton-line w60"></div>`;
+    let users;
+    try{ users = await api('/api/admin/users'); }
+    catch(e){
+      el.innerHTML = `<div class="state-box error"><div class="state-icon">&#9888;</div><div class="state-msg">${escapeHtml(e.message)}</div><button class="btn secondary small" id="users-retry">Retry</button></div>`;
+      document.getElementById('users-retry').onclick = loadUsers;
+      return;
+    }
+    renderSortableTable('users-table', users, {
+      rowKey: u=>u.user_id, defaultSortKey: 'user_id', searchFields: ['user_id','name','role','department'], pageSize: 25,
+      emptyMessage: 'No users.',
+      columns: [
+        {key:'user_id', label:'User ID', sortable:true, render:u=>`<span class="mono">${escapeHtml(u.user_id)}</span>`},
+        {key:'name', label:'Name', sortable:true, render:u=>escapeHtml(u.name)},
+        {key:'role', label:'Role', sortable:true, render:u=>`<span class="badge dept-${u.role}">${u.role}</span>`},
+        {key:'department', label:'Department', sortable:true, render:u=>`<span class="mono">${escapeHtml(u.department||'—')}</span>`},
+        {key:'active', label:'Active', sortable:true, sortValue:u=>u.active?1:0, render:u=>u.active?'<span class="lamp green" style="display:inline-block;" role="img" aria-label="active"></span>':'<span class="lamp red" style="display:inline-block;" role="img" aria-label="inactive"></span>'},
+      ],
+    });
+  }
+
+  async function loadAudit(){
+    const el = document.getElementById('audit-table');
+    el.innerHTML = `<div class="skeleton-line w80"></div><div class="skeleton-line w60"></div><div class="skeleton-line w40"></div>`;
+    let audit;
+    try{ audit = await api('/api/admin/audit-log?limit=300'); }
+    catch(e){
+      el.innerHTML = `<div class="state-box error"><div class="state-icon">&#9888;</div><div class="state-msg">${escapeHtml(e.message)}</div><button class="btn secondary small" id="audit-retry">Retry</button></div>`;
+      document.getElementById('audit-retry').onclick = loadAudit;
+      return;
+    }
+    renderSortableTable('audit-table', audit, {
+      rowKey: a=>a.log_id, defaultSortKey: 'timestamp', searchFields: ['action','user_id'], pageSize: 30,
+      emptyMessage: 'No audit entries match.',
+      columns: [
+        {key:'timestamp', label:'Time', sortable:true, render:a=>`<span class="mono">${fmtDt(a.timestamp)}</span>`},
+        {key:'action', label:'Action', sortable:true, render:a=>`<span class="mono">${escapeHtml(a.action)}</span>`},
+        {key:'user_id', label:'User', sortable:true, render:a=>`<span class="mono">${escapeHtml(a.user_id)}</span>`},
+        {key:'details', label:'Details', render:a=>`<span class="mono small-muted">${escapeHtml(JSON.stringify(a.details))}</span>`},
+      ],
+    });
+  }
+
+  document.getElementById('asset-form').onsubmit = async (ev)=>{
+    ev.preventDefault();
+    const fd = new FormData(ev.target);
+    try{
+      await api('/api/admin/asset-criticality', {method:'POST', body:{asset_id: fd.get('asset_id'), criticality: parseInt(fd.get('criticality'))}});
+      toast('Asset criticality set', 'ok');
+      loadAssetsReal();
+    }catch(e){ toast('Failed: ' + e.message, 'err'); }
+  };
+
+  loadWeights();
+  loadAssetsReal();
+  loadUsers();
+  loadAudit();
+}
+
+boot();
+</script>
+</body>
+</html>

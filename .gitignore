@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+data/abps.db
+data/abps.db-journal
+
+# Real downloaded datasets (fetched via the curl commands in README.md §2) —
+# large (schedules.json ~80MB) and reproducible, so they don't belong in git.
+data/raw/*.json
