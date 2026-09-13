@@ -26,3 +26,28 @@ class SourceSystemAdapter(ABC):
 
     def health_check(self) -> dict:
         return {"system": self.system_name, "connected": False, "reason": "stub adapter, no live endpoint configured"}
+
+
+class WeatherSourceAdapter(ABC):
+    """Base class for a live adapter to a weather forecast provider — the
+    7th ingested data source, following the exact same pluggable-adapter
+    pattern as SourceSystemAdapter above so swapping providers later (e.g.
+    IMD's own API once credentials are available) is a config change, not a
+    rewrite of weather_service.py or anything downstream of it."""
+
+    provider_name: str = "unspecified"
+
+    @abstractmethod
+    def fetch_forecast(self, lat: float, lon: float, days: int = 7) -> List[dict]:
+        """Return a list of per-day forecast dicts in WeatherForecastEntry
+        field shape (forecast_date, precipitation_probability_pct,
+        wind_speed_kmh, visibility_km, lightning_risk, temperature_max_c,
+        temperature_min_c) for the given coordinates. Must set source='real'
+        and provider=self.provider_name. Raises on failure rather than
+        returning a partial/fabricated result — the caller decides whether
+        to fall back to the synthetic adapter, and always labels which
+        happened."""
+        raise NotImplementedError
+
+    def health_check(self) -> dict:
+        return {"provider": self.provider_name, "connected": False, "reason": "stub adapter, no live endpoint configured"}

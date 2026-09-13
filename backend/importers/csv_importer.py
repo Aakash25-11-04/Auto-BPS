@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 import models
 from pipeline import cleaning, id_mapping, normalization
+from tz_utils import ist_today
 
 VALID_DEPARTMENTS = {"ENG", "TD", "SNT"}
 TRUE_STRINGS = {"true", "1", "yes", "y"}
@@ -110,7 +111,7 @@ def parse_rows(df: pd.DataFrame, department: str, db: Session, source_system: st
         if reported_date_raw:
             try:
                 reported_date = dt.datetime.strptime(reported_date_raw, "%Y-%m-%d").date()
-                today = dt.date.today()
+                today = ist_today()  # overdue_days is an IST calendar-day count
                 if reported_date > today:
                     errors.append(f"reported_date '{reported_date_raw}' is in the future")
                 else:

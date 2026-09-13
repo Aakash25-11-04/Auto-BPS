@@ -203,7 +203,7 @@ def explain_task(db, horizon: str, task_id: str) -> dict:
 
 def _try_counterfactual(db, horizon: str, task: models.MaintenanceTask, **overrides) -> dict:
     """Actually re-solves with the task's severity/duration temporarily
-    changed (never committed — always rolled back) to test whether that
+    changed (never left committed — always restored) to test whether that
     specific change would genuinely have gotten it scheduled. Not a guess:
     a real CP-SAT re-solve decides the answer."""
     original = {k: getattr(task, k) for k in overrides}
@@ -226,10 +226,20 @@ def _try_counterfactual(db, horizon: str, task: models.MaintenanceTask, **overri
             ),
         }
     finally:
+        # rescore_task(), when the active scoring source is 'ml'/'blend', goes
+        # through ml.risk_model.predict_for_task() — which commits as a side
+        # effect of caching its own prediction. That commit silently makes
+        # THIS temporary mutation permanent, and a plain db.rollback() here
+        # (the previous approach) is then a no-op — there is nothing left
+        # pending to roll back, so the counterfactual value stuck in the
+        # database for good. Explicitly restoring the original values AND
+        # committing that restoration (rather than hoping rollback undoes an
+        # uncommitted change that may already have been committed by nested
+        # code) guarantees the task is left exactly as found either way.
         for k, v in original.items():
             setattr(task, k, v)
         task.priority_score, task.priority_reason = original_score, original_reason
-        db.rollback()
+        db.commit()
 
 
 # ============================================================ Shadow prices

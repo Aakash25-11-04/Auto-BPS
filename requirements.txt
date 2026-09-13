@@ -9,6 +9,7 @@ python-multipart>=0.0.9
 python-jose[cryptography]>=3.3
 bcrypt>=4.1
 reportlab>=4.0
+requests>=2.31
 
 # Layer 2 — PostgreSQL migration support (SQLite remains the local-dev default)
 alembic>=1.13

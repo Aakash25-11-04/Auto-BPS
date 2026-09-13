@@ -1,8 +1,25 @@
-"""Pydantic request/response schemas."""
-import datetime as dt
-from typing import List, Optional
+"""Pydantic request/response schemas.
 
-from pydantic import BaseModel, Field
+Datetime fields use one of two Annotated aliases (see tz_utils.py for the
+full storage/display contract this codebase follows):
+  UtcOut — RESPONSE fields. Attaches UTC tzinfo before Pydantic serializes,
+    so the JSON value always carries an explicit offset (e.g. "...+00:00"),
+    never a bare, ambiguous string.
+  IstIn — REQUEST fields a user types a time into (corridor availability,
+    freight forecast windows, manual reschedule). A naive submitted value
+    (no offset — exactly what an <input type=datetime-local> sends) is
+    interpreted as IST and converted to UTC; an explicit-offset value is
+    honored as given.
+"""
+import datetime as dt
+from typing import Annotated, List, Optional
+
+from pydantic import BaseModel, BeforeValidator, Field
+
+from tz_utils import ensure_utc_out, parse_user_local_datetime
+
+UtcOut = Annotated[dt.datetime, BeforeValidator(ensure_utc_out)]
+IstIn = Annotated[dt.datetime, BeforeValidator(parse_user_local_datetime)]
 
 
 class TaskCreate(BaseModel):
@@ -41,7 +58,7 @@ class TaskOut(BaseModel):
     source: str
     source_ref: str
     created_by: str
-    created_at: dt.datetime
+    created_at: UtcOut
 
     class Config:
         from_attributes = True
@@ -53,8 +70,8 @@ class MutualExclusionRequest(BaseModel):
 
 class CorridorAvailabilityCreate(BaseModel):
     corridor_id: str
-    start_time: dt.datetime
-    end_time: dt.datetime
+    start_time: IstIn
+    end_time: IstIn
     horizon: str = "weekly"
 
 
@@ -67,13 +84,53 @@ class DeriveAvailabilityRequest(BaseModel):
 
 class FreightForecastCreate(BaseModel):
     corridor_id: str
-    forecast_window_start: dt.datetime
-    forecast_window_end: dt.datetime
+    forecast_window_start: IstIn
+    forecast_window_end: IstIn
     expected_goods_traffic: str = "medium"
 
 
 class RescheduleRequest(BaseModel):
-    new_start: dt.datetime
+    new_start: IstIn
+
+
+class ManualAssignRequest(BaseModel):
+    """FR-COA-03 manual override: place an UNSCHEDULED (or not-yet-in-this-
+    plan) task into a specific corridor window, bypassing the optimizer.
+    NOTE: no user_id field, same reasoning as ApprovalRequest below — who
+    performed the override is always the authenticated caller, never a
+    client-supplied value."""
+
+    plan_id: str
+    task_id: str
+    slot_id: str
+    start_time_ist: IstIn
+    reason: str = Field(min_length=1)
+
+
+class ManualUnscheduleRequest(BaseModel):
+    plan_id: str
+    task_id: str
+    reason: str = Field(min_length=1)
+
+
+class ManualSwapRequest(BaseModel):
+    plan_id: str
+    incoming_task_id: str
+    outgoing_task_id: str
+    slot_id: str
+    start_time_ist: IstIn
+    reason: str = Field(min_length=1)
+
+
+class OverrideRequestCreate(BaseModel):
+    task_id: str
+    plan_id: Optional[str] = ""
+    reason: str = Field(min_length=1)
+
+
+class OverrideRequestDecision(BaseModel):
+    decision: str  # accept|decline
+    decision_reason: Optional[str] = ""
 
 
 class ApprovalRequest(BaseModel):
@@ -122,7 +179,7 @@ class TokenResponse(BaseModel):
     access_token: str
     refresh_token: Optional[str] = None
     token_type: str = "bearer"
-    expires_at: dt.datetime
+    expires_at: UtcOut
     user: dict
 
 
@@ -141,3 +198,33 @@ class ChangePasswordRequest(BaseModel):
 
 class ImpersonateRequest(BaseModel):
     target_user_id: str
+
+
+class WeatherIngestRequest(BaseModel):
+    corridor_id: str
+    days: int = Field(ge=1, le=16, default=7)
+
+
+class WeatherRuleUpdate(BaseModel):
+    rule_id: str
+    label: Optional[str] = ""
+    defect_type_pattern: str
+    hazard: str  # lightning|wind|heat|rain|fog
+    mode: str  # hard|soft|priority
+    threshold: float = 0.0
+    duration_buffer_pct: float = 0.0
+    priority_points: float = 0.0
+    active: bool = True
+
+
+class DepartmentCapacityCreate(BaseModel):
+    department: str  # ENG | TD | SNT
+    date: Optional[dt.date] = None  # IST calendar date; omit for the department default
+    max_concurrent_gangs: int = Field(ge=0, le=100)
+    notes: Optional[str] = ""
+
+
+class DepartmentCapacityUpdate(BaseModel):
+    date: Optional[dt.date] = None
+    max_concurrent_gangs: Optional[int] = Field(default=None, ge=0, le=100)
+    notes: Optional[str] = None

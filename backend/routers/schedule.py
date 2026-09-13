@@ -23,44 +23,77 @@ import csv
 import datetime as dt
 import io
 import json
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 import auth
+import crew_capacity
 import models
 import schemas
 from audit import log
 from baseline import run_baseline
 from database import get_db
-from scheduler import DEFAULT_CORRIDOR_CAPACITY, reschedule_entry, run_schedule
+from scheduler import (
+    DEFAULT_CORRIDOR_CAPACITY,
+    compute_override_impact,
+    manual_assign_task,
+    manual_swap_tasks,
+    manual_unschedule_task,
+    reschedule_entry,
+    run_schedule,
+)
+from tz_utils import parse_user_local_datetime, utc_iso, utc_now
 
 router = APIRouter(prefix="/api/schedule", tags=["schedule"])
 
 DEPT_ROLES = ("ENG", "TD", "SNT")
+# FR-COA-03: manual overrides are executed by COA or ADMIN only — a
+# department can REQUEST one (see /override-requests below) but never
+# execute one directly. This is deliberately WIDER than /run and /approve
+# (COA-only, see this module's docstring) because a manual override is an
+# individually audit-logged, one-block-at-a-time operational correction, not
+# a system-wide scheduling decision or a plan-wide publish.
+OVERRIDE_ROLES = ("COA", "ADMIN")
 
 
 @router.post("/run")
 def run(
     horizon: str = "weekly",
     corridor_capacity: int = DEFAULT_CORRIDOR_CAPACITY,
+    preserve_manual_overrides: bool = True,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.require_role("COA")),
 ):
+    """preserve_manual_overrides (default True): every manually-placed block
+    in the horizon's current plan is PINNED before re-solving — the
+    optimizer works around it instead of silently moving or dropping it.
+    Uncheck it (the frontend surfaces this as a checkbox next to "Run
+    Scheduler") to let this run reconsider manual overrides exactly like any
+    other task."""
     if horizon not in ("weekly", "monthly"):
         raise HTTPException(status_code=400, detail="horizon must be 'weekly' or 'monthly'")
     if corridor_capacity < 1:
         raise HTTPException(status_code=400, detail="corridor_capacity must be at least 1")
 
     try:
-        result = run_schedule(db, horizon, corridor_capacity=corridor_capacity)
+        result = run_schedule(
+            db, horizon, corridor_capacity=corridor_capacity, preserve_manual_overrides=preserve_manual_overrides
+        )
     except Exception as e:
         db.rollback()
         log(db, "schedule_run_failed", current_user.user_id, {"horizon": horizon, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"schedule run failed, last published plan is untouched: {e}")
 
-    log(db, "schedule_run", current_user.user_id, {"horizon": horizon, "plan_id": result["plan_id"], "metrics": result["metrics"]})
+    log(
+        db, "schedule_run", current_user.user_id,
+        {
+            "horizon": horizon, "plan_id": result["plan_id"], "metrics": result["metrics"],
+            "preserve_manual_overrides": preserve_manual_overrides,
+        },
+    )
     return result
 
 
@@ -86,9 +119,220 @@ def reschedule(
         db,
         "block_manually_rescheduled",
         current_user.user_id,
-        {"entry_id": entry_id, "task_id": result["task_id"], "new_start": payload.new_start.isoformat()},
+        # payload.new_start is naive-but-UTC (IstIn already converted it
+        # from whatever the caller sent) — utc_iso() gives it an explicit
+        # offset rather than a bare, ambiguous .isoformat() string.
+        {"entry_id": entry_id, "task_id": result["task_id"], "new_start": utc_iso(payload.new_start)},
     )
     return result
+
+
+@router.post("/manual-assign")
+def manual_assign(
+    payload: schemas.ManualAssignRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.require_role(*OVERRIDE_ROLES)),
+):
+    """FR-COA-03: place an unscheduled task into a specific corridor window,
+    bypassing the optimizer entirely. Hard safety constraints (real-train
+    overlap, window containment, corridor match) cannot be overridden even
+    here and reject the call outright; soft constraints (capacity, mutual
+    exclusion, weather, competing priority) come back as `warnings` and
+    never block the override — see scheduler.manual_assign_task."""
+    try:
+        result = manual_assign_task(
+            db, payload.plan_id, payload.task_id, payload.slot_id, payload.start_time_ist,
+            current_user.user_id, payload.reason,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # A department's pending "please schedule this" request for this exact
+    # task is auto-closed by COA actually acting on it — otherwise the
+    # request would sit at 'pending' forever even though it was granted.
+    pending_requests = (
+        db.query(models.OverrideRequest)
+        .filter_by(task_id=payload.task_id, status="pending")
+        .all()
+    )
+    for req in pending_requests:
+        req.status = "accepted"
+        req.decided_by = current_user.user_id
+        req.decision_reason = f"Manually scheduled by {current_user.user_id}: {payload.reason}"
+        req.decided_at = utc_now()
+    if pending_requests:
+        db.commit()
+
+    log(
+        db, "block_manually_assigned", current_user.user_id,
+        {
+            "plan_id": payload.plan_id, "task_id": payload.task_id, "slot_id": payload.slot_id,
+            "start_time": utc_iso(payload.start_time_ist), "reason": payload.reason, "warnings": result["warnings"],
+        },
+    )
+    return result
+
+
+@router.post("/manual-unschedule")
+def manual_unschedule(
+    payload: schemas.ManualUnscheduleRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.require_role(*OVERRIDE_ROLES)),
+):
+    """FR-COA-03: pull a task out of the plan entirely — a deliberate human
+    removal, distinct from the optimizer failing to place it (status becomes
+    'manually_removed', never 'unscheduled')."""
+    try:
+        result = manual_unschedule_task(db, payload.plan_id, payload.task_id, current_user.user_id, payload.reason)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    log(
+        db, "block_manually_unscheduled", current_user.user_id,
+        {"plan_id": payload.plan_id, "task_id": payload.task_id, "reason": payload.reason},
+    )
+    return result
+
+
+@router.post("/manual-swap")
+def manual_swap(
+    payload: schemas.ManualSwapRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.require_role(*OVERRIDE_ROLES)),
+):
+    """FR-COA-03: displace outgoing_task_id and place incoming_task_id into
+    its window instead, atomically — the one supported way to add a task to
+    an already-at-capacity window without silently bumping whoever was
+    there (see manual_assign_task's ceiling check)."""
+    try:
+        result = manual_swap_tasks(
+            db, payload.plan_id, payload.incoming_task_id, payload.outgoing_task_id, payload.slot_id,
+            payload.start_time_ist, current_user.user_id, payload.reason,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    log(
+        db, "blocks_manually_swapped", current_user.user_id,
+        {
+            "plan_id": payload.plan_id, "incoming_task_id": payload.incoming_task_id,
+            "outgoing_task_id": payload.outgoing_task_id, "slot_id": payload.slot_id,
+            "start_time": utc_iso(payload.start_time_ist), "reason": payload.reason, "warnings": result["warnings"],
+        },
+    )
+    return result
+
+
+@router.get("/override-impact")
+def override_impact(
+    plan_id: str,
+    task_id: str,
+    slot_id: str,
+    start_time_ist: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.require_role(*OVERRIDE_ROLES)),
+):
+    """DRY RUN for manual-assign/manual-swap: shows what WOULD happen —
+    soft-constraint warnings, whether displacement would be required, the
+    optimizer's own original reasoning for this task, and the proposed
+    window's weather — without writing anything. The COA is expected to
+    call this before confirming a real override."""
+    try:
+        start = parse_user_local_datetime(start_time_ist)
+    except Exception:
+        raise HTTPException(status_code=400, detail="start_time_ist must be a valid ISO-8601 datetime")
+    try:
+        return compute_override_impact(db, plan_id, task_id, slot_id, start)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/override-requests")
+def create_override_request(
+    payload: schemas.OverrideRequestCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.require_role(*DEPT_ROLES)),
+):
+    """A department can REQUEST that COA manually schedule one of their
+    (currently unscheduled) tasks ahead of the optimizer's own placement —
+    they cannot execute an override themselves (see OVERRIDE_ROLES above)."""
+    task = db.query(models.MaintenanceTask).filter_by(task_id=payload.task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task.department != current_user.department:
+        raise HTTPException(status_code=403, detail="you can only request an override for your own department's task")
+
+    request_id = f"ovr-{uuid.uuid4().hex[:8]}"
+    req = models.OverrideRequest(
+        request_id=request_id, task_id=payload.task_id, plan_id=payload.plan_id or "",
+        department=current_user.department, requested_by=current_user.user_id, reason=payload.reason,
+    )
+    db.add(req)
+    db.commit()
+    log(
+        db, "override_request_created", current_user.user_id,
+        {"request_id": request_id, "task_id": payload.task_id, "reason": payload.reason},
+    )
+    return {
+        "request_id": request_id, "task_id": payload.task_id, "plan_id": req.plan_id, "department": req.department,
+        "requested_by": req.requested_by, "reason": req.reason, "status": req.status, "created_at": req.created_at,
+    }
+
+
+@router.get("/override-requests")
+def list_override_requests(
+    status: str = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """COA/ADMIN see the full queue; a department role sees only its own
+    requests and their outcome (pending/accepted/declined, with COA's
+    stated reason when declined)."""
+    query = db.query(models.OverrideRequest)
+    if current_user.role in DEPT_ROLES:
+        query = query.filter_by(department=current_user.department)
+    if status:
+        query = query.filter_by(status=status)
+    rows = query.order_by(models.OverrideRequest.created_at.desc()).all()
+    return [
+        {
+            "request_id": r.request_id, "task_id": r.task_id, "plan_id": r.plan_id, "department": r.department,
+            "requested_by": r.requested_by, "reason": r.reason, "status": r.status,
+            "decision_reason": r.decision_reason, "decided_by": r.decided_by, "decided_at": r.decided_at,
+            "created_at": r.created_at,
+        }
+        for r in rows
+    ]
+
+
+@router.post("/override-requests/{request_id}/decide")
+def decide_override_request(
+    request_id: str,
+    payload: schemas.OverrideRequestDecision,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.require_role(*OVERRIDE_ROLES)),
+):
+    if payload.decision not in ("accept", "decline"):
+        raise HTTPException(status_code=400, detail="decision must be 'accept' or 'decline'")
+    req = db.query(models.OverrideRequest).filter_by(request_id=request_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="override request not found")
+    if req.status != "pending":
+        raise HTTPException(status_code=400, detail=f"request is already '{req.status}'")
+
+    req.status = "accepted" if payload.decision == "accept" else "declined"
+    req.decided_by = current_user.user_id
+    req.decision_reason = payload.decision_reason or ""
+    req.decided_at = utc_now()
+    db.commit()
+    log(
+        db, "override_request_decided", current_user.user_id,
+        {"request_id": request_id, "decision": req.status, "task_id": req.task_id},
+    )
+    return {
+        "request_id": req.request_id, "status": req.status, "decided_by": req.decided_by,
+        "decision_reason": req.decision_reason, "decided_at": req.decided_at,
+    }
 
 
 def _scope_entries(entries: list, current_user: models.User) -> list:
@@ -113,6 +357,9 @@ def get_plan(horizon: str = "weekly", status: str = None, db: Session = Depends(
 
     entries = db.query(models.BlockPlanEntry).filter_by(plan_id=plan.plan_id).all()
     tasks_by_id = {t.task_id: t for t in db.query(models.MaintenanceTask).all()}
+    gangs = crew_capacity.gang_map(db, plan.plan_id)
+    plan_metrics = json.loads(plan.metrics_json or "{}")
+    crew_limited_ids = {tid for ids in (plan_metrics.get("crew_limited_unscheduled") or {}).values() for tid in ids}
 
     entry_rows = []
     for e in entries:
@@ -141,6 +388,12 @@ def get_plan(horizon: str = "weekly", status: str = None, db: Session = Depends(
                 "overdue_days": task.overdue_days if task else None,
                 "safety_critical": task.safety_critical if task else None,
                 "interlocking_critical": task.interlocking_critical if task else None,
+                "override": e.override,
+                "override_reason": e.override_reason,
+                "override_by": e.override_by,
+                "override_at": e.override_at,
+                # Feature 10: which gang executes this block (post-solve label).
+                "gang_id": gangs.get(e.task_id),
             }
         )
     entry_rows = _scope_entries(entry_rows, current_user)
@@ -155,6 +408,12 @@ def get_plan(horizon: str = "weekly", status: str = None, db: Session = Depends(
             "corridor_id": t.corridor_id,
             "priority_score": t.priority_score,
             "reason": t.unscheduled_reason,
+            # crew_capacity = left out for want of a gang (add crew, not
+            # corridor time) — distinct from weather / competition losses.
+            "reason_code": (
+                crew_capacity.CREW_REASON_CODE if t.task_id in crew_limited_ids
+                else ("weather" if (t.unscheduled_reason or "").startswith("No weather-safe") else "other")
+            ),
         }
         for t in unscheduled_query.all()
     ]
@@ -164,18 +423,22 @@ def get_plan(horizon: str = "weekly", status: str = None, db: Session = Depends(
         "horizon": plan.horizon,
         "version": plan.version,
         "status": plan.status,
-        "metrics": json.loads(plan.metrics_json or "{}"),
+        "modified_after_publication": plan.modified_after_publication,
+        "metrics": plan_metrics,
         "approved_by": plan.approved_by,
         "approved_at": plan.approved_at,
         "entries": entry_rows,
         "unscheduled": unscheduled_rows,
+        # Aggregate per-department gang utilization (not task-level data, so
+        # shown to every role like the other metrics).
+        "resource_summary": crew_capacity.resource_summary(db, plan, entries),
     }
 
 
 _EXPORT_COLUMNS = [
     "plan_id", "horizon", "plan_status", "task_id", "department", "corridor_id",
     "asset_id", "defect_type", "priority_score", "assigned_window_start",
-    "assigned_window_end", "co_scheduled_departments",
+    "assigned_window_end", "co_scheduled_departments", "gang_id",
 ]
 
 
@@ -191,6 +454,7 @@ def _export_rows(db: Session, horizon: str, current_user: models.User):
 
     entries = db.query(models.BlockPlanEntry).filter_by(plan_id=plan.plan_id).order_by(models.BlockPlanEntry.assigned_window_start).all()
     tasks_by_id = {t.task_id: t for t in db.query(models.MaintenanceTask).all()}
+    gangs = crew_capacity.gang_map(db, plan.plan_id)
 
     if current_user.role in DEPT_ROLES:
         entries = [e for e in entries if e.department == current_user.department]
@@ -212,6 +476,7 @@ def _export_rows(db: Session, horizon: str, current_user: models.User):
                 "assigned_window_start": e.assigned_window_start.strftime("%Y-%m-%d %H:%M"),
                 "assigned_window_end": e.assigned_window_end.strftime("%Y-%m-%d %H:%M"),
                 "co_scheduled_departments": ",".join(d for d in e.co_scheduled_departments.split(",") if d) or "solo",
+                "gang_id": gangs.get(e.task_id, ""),
             }
         )
     return plan, rows
@@ -267,7 +532,7 @@ def export_plan(
     cell_style = ParagraphStyle("cell", parent=styles["Normal"], fontSize=7, leading=8.5)
     header_style = ParagraphStyle("cellHeader", parent=cell_style, textColor=colors.white, fontName="Helvetica-Bold")
 
-    col_widths_in = [1.05, 0.55, 0.55, 0.95, 0.6, 0.6, 0.8, 0.95, 0.55, 0.95, 0.95, 0.85]  # sums to ~9.65in (page usable width)
+    col_widths_in = [0.95, 0.5, 0.5, 0.9, 0.55, 0.6, 0.75, 0.85, 0.5, 0.9, 0.9, 0.75, 0.85]  # sums to ~9.5in (page usable width ~10.3in)
     col_widths = [w * inch for w in col_widths_in]
 
     header = [Paragraph(c.replace("_", " ").title(), header_style) for c in _EXPORT_COLUMNS]
@@ -397,7 +662,7 @@ def approve(
             p.status = "superseded"
         plan.status = "published"
         plan.approved_by = current_user.user_id
-        plan.approved_at = dt.datetime.utcnow()
+        plan.approved_at = utc_now()
         action = "schedule_plan_approved"
     else:
         plan.status = "rejected"

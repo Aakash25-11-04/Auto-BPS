@@ -26,6 +26,12 @@ DEFAULT_WEIGHTS = {
     "w_overdue": 1.5,
     "w_criticality": 8.0,
     "w_safety_flag": 25.0,
+    # Weather-aware scheduling (Layer 3A): scales every weather-driven
+    # priority contribution from weather_service.weather_priority_bonus.
+    # Default 1.0 means a configured rule's priority_points apply exactly as
+    # tuned; set to 0 to disable weather's effect on scoring entirely without
+    # touching the per-rule config.
+    "w_weather_risk": 1.0,
 }
 
 OVERDUE_CAP_DAYS = 60
@@ -57,7 +63,17 @@ def score_task(db: Session, task: models.MaintenanceTask) -> tuple:
     safety_flag = task.safety_critical or task.interlocking_critical
     safety_pts = weights["w_safety_flag"] if safety_flag else 0.0
 
-    total = severity_pts + overdue_pts + criticality_pts + safety_pts
+    # Weather-aware scheduling (Layer 3A): only applies when the task's own
+    # defect_type is in a configurable weather-sensitive category AND severe
+    # weather is forecast on its corridor within the reliable-forecast
+    # horizon — see weather_service.weather_priority_bonus. Lazy import
+    # avoids a hard dependency for callers that never touch weather (mirrors
+    # the ml.risk_model lazy import below).
+    from weather_service import weather_priority_bonus
+
+    weather_pts, weather_fragment = weather_priority_bonus(db, task, weights["w_weather_risk"])
+
+    total = severity_pts + overdue_pts + criticality_pts + safety_pts + weather_pts
 
     parts = [
         f"severity {task.severity}/5 contributed {severity_pts:.1f} pts",
@@ -75,6 +91,8 @@ def score_task(db: Session, task: models.MaintenanceTask) -> tuple:
         parts.append(f"{'/'.join(flag_names)} flag contributed {safety_pts:.1f} pts")
 
     justification = f"Priority score {total:.1f}: " + "; ".join(parts) + "."
+    if weather_fragment:
+        justification += weather_fragment
     return total, justification
 
 

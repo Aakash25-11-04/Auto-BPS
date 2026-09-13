@@ -28,6 +28,7 @@ from xgboost import XGBClassifier, XGBRegressor
 
 import models
 from ml import features
+from tz_utils import utc_iso, utc_now
 from ml.synthetic_data import generate_synthetic_history
 
 MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "data", "ml_models")
@@ -63,7 +64,12 @@ def train_and_evaluate(db: Session, n_records: int = 2000, test_size: float = 0.
         X, y_clf, y_reg, test_size=test_size, random_state=seed, stratify=y_clf
     )
 
-    report = {"trained_at": dt.datetime.utcnow().isoformat(), "n_records": n_records, "test_size": test_size, "trained_on": "synthetic"}
+    # utc_iso(), not a bare .isoformat() call on a naive datetime — this
+    # field is a pre-built string, so it bypasses the app-wide JSON encoder
+    # fix (tz_utils.install_global_json_encoder) that adds an explicit
+    # offset to actual datetime objects; utc_iso() gets the same explicit
+    # "+00:00" here directly.
+    report = {"trained_at": utc_iso(utc_now()), "n_records": n_records, "test_size": test_size, "trained_on": "synthetic"}
 
     # ---- classification: failure risk ----
     xgb_clf = XGBClassifier(
@@ -160,7 +166,7 @@ def train_and_evaluate(db: Session, n_records: int = 2000, test_size: float = 0.
         rank_assessment,
     ]
 
-    model_id = f"risk-{winner_name}-{dt.datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    model_id = f"risk-{winner_name}-{utc_now().strftime('%Y%m%d%H%M%S')}"
     joblib.dump(winner_model, ACTIVE_RISK_MODEL_PATH)
     with open(ACTIVE_RISK_MODEL_META_PATH, "w") as f:
         json.dump({"model_id": model_id, "model_type": winner_name}, f)
@@ -231,7 +237,7 @@ def predict_for_task(db: Session, task: models.MaintenanceTask) -> dict:
         existing.model_id, existing.failure_risk_probability = model_id, result["failure_risk_probability"]
         existing.urgency_score, existing.criticality_score = result["urgency_score"], result["criticality_score"]
         existing.ml_priority_score, existing.shap_explanation = result["ml_priority_score"], explanation
-        existing.predicted_at = dt.datetime.utcnow()
+        existing.predicted_at = utc_now()
     else:
         db.add(models.TaskPrediction(task_id=task.task_id, **{k: result[k] for k in (
             "model_id", "failure_risk_probability", "urgency_score", "criticality_score", "ml_priority_score"

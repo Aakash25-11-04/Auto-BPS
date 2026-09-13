@@ -18,6 +18,7 @@ import models
 import schemas
 from audit import log
 from database import get_db
+from tz_utils import ist_iso, utc_iso
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -40,17 +41,23 @@ def login(payload: schemas.LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
     if auth.is_locked(user):
-        log(db, "login_blocked_locked", user.user_id, {"locked_until": user.locked_until.isoformat()})
+        # user.locked_until is naive-but-UTC (see tz_utils.py) — a bare
+        # .isoformat() call on it would silently omit the offset (exactly
+        # the ambiguous-timestamp bug this whole fix exists to eliminate);
+        # both the audit detail and the message shown to the locked-out
+        # user go through ist_iso() so what a human is told is IST, like
+        # every other user-facing timestamp in this app.
+        log(db, "login_blocked_locked", user.user_id, {"locked_until": utc_iso(user.locked_until)})
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Account locked until {user.locked_until.isoformat()} UTC after repeated failed attempts",
+            detail=f"Account locked until {ist_iso(user.locked_until)} IST after repeated failed attempts",
         )
 
     if not auth.verify_password(payload.password, user.password_hash):
         newly_locked = auth.register_failed_login(db, user)
         log(db, "login_failed", user.user_id, {"attempt_count": user.failed_login_attempts})
         if newly_locked:
-            log(db, "account_locked", user.user_id, {"locked_until": user.locked_until.isoformat(), "reason": "too many failed attempts"})
+            log(db, "account_locked", user.user_id, {"locked_until": utc_iso(user.locked_until), "reason": "too many failed attempts"})
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
     auth.register_successful_login(db, user)

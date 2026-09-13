@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 import models
 from ml.synthetic_data import ASSET_TYPES, MONSOON_MONTHS
+from tz_utils import ist_today
 
 NUMERIC_FEATURES = [
     "severity", "age_years", "criticality", "overdue_days",
@@ -49,7 +50,7 @@ def build_feature_vector_for_task(db: Session, task: models.MaintenanceTask) -> 
     if asset_type not in ASSET_TYPES:
         asset_type = "rail"
 
-    today = dt.date.today()
+    today = ist_today()  # monsoon-month feature has IST business meaning ("this month" for an Indian railway)
     row = {
         "severity": task.severity,
         "age_years": age_years,

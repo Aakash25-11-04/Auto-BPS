@@ -12,11 +12,20 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 
+import crew_capacity
+import map_service
 import seed
+import tz_utils
 from database import Base, DATABASE_URL, SessionLocal, engine
-from routers import admin, auth as auth_router, corridor, decision, ml, pipeline, schedule, tasks
+from routers import admin, auth as auth_router, corridor, decision, ml, network_map, pipeline, schedule, tasks, weather
+
+# Must run before any request is served: every plain-dict JSON response in
+# the app (the majority of routes) picks up an explicit UTC offset on every
+# datetime field from this one call — see tz_utils.install_global_json_encoder.
+tz_utils.install_global_json_encoder()
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend")
 
@@ -37,10 +46,12 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         seed.seed_baseline_users(db)
+        crew_capacity.ensure_default_capacity(db)  # Feature 10: ENG 4 / TD 3 / SNT 3 unless Admin changed them
         if DEMO_DATA:
             seed.seed_demo_tasks(db, DEMO_CORRIDOR)
     finally:
         db.close()
+    map_service.warm_cache(SessionLocal)  # Feature 11: parse map geometry off the request path
     yield
 
 
@@ -52,6 +63,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# The network map's FeatureCollections are several MB of highly repetitive
+# JSON; gzip cuts them ~5-8x. compresslevel 5 keeps compression itself cheap.
+app.add_middleware(GZipMiddleware, minimum_size=2048, compresslevel=5)
 
 app.include_router(auth_router.router)
 app.include_router(tasks.router)
@@ -61,6 +75,8 @@ app.include_router(admin.router)
 app.include_router(pipeline.router)
 app.include_router(ml.router)
 app.include_router(decision.router)
+app.include_router(weather.router)
+app.include_router(network_map.router)
 
 
 @app.get("/health")

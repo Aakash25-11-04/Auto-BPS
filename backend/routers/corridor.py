@@ -11,17 +11,23 @@ forecast) carry no department-scoped task data, so any authenticated user
 may view them.
 """
 import datetime as dt
+import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 import auth
+import corridor_builder
+import corridor_search
 import models
 import schemas
+import station_loader
 import timetable_loader
+import vacancy
 from audit import log
 from database import get_db
+from tz_utils import IST, UTC, ist_date_to_utc_bounds, ist_iso, ist_today
 
 router = APIRouter(tags=["corridor"])
 
@@ -39,11 +45,104 @@ def load_timetable(db: Session = Depends(get_db), current_user: models.User = De
                 "no synthetic data will be substituted."
             ),
         )
-    stations_count = timetable_loader.load_stations(db)
+    station_report = station_loader.load_stations(db, include_remote=True)
     result = timetable_loader.load_timetable(db)
-    result["stations_loaded"] = stations_count
-    log(db, "timetable_loaded", current_user.user_id, result)
+    result["station_master"] = station_report
+    log(db, "timetable_loaded", current_user.user_id,
+        {k: v for k, v in result.items() if k != "station_master"})
     return result
+
+
+@router.post("/api/data/load-stations")
+def load_station_master(
+    include_remote: bool = True,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.require_role("COA")),
+):
+    """Fix 1: (re)loads and MERGES the real station master from the open
+    datasets, idempotently (upsert — safe to re-run). Reports which sources
+    were used, which failed (with the URL and error, never silently), and
+    which timetable station codes the master is still missing."""
+    report = station_loader.load_stations(db, include_remote=include_remote)
+    log(db, "station_master_loaded", current_user.user_id,
+        {"total": report["total_stations"], "with_coordinates": report["with_coordinates"],
+         "created": report["stations_created"], "updated": report["stations_updated"]})
+    return report
+
+
+@router.post("/api/corridors/build")
+def build_corridors(db: Session = Depends(get_db), current_user: models.User = Depends(auth.require_role("COA"))):
+    """Fix 2: derives the REAL corridor master from the loaded timetable —
+    every physical section, plus junction-to-junction route corridors with
+    their ordered intermediate stations, real polyline geometry and
+    distance. Re-runnable (upsert by corridor_id)."""
+    try:
+        report = corridor_builder.build_corridors(db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    log(db, "corridors_built", current_user.user_id, report)
+    return report
+
+
+@router.get("/api/corridors")
+def list_corridors(
+    kind: str = None,
+    q: str = None,
+    min_trains: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    query = db.query(models.Corridor)
+    if kind:
+        query = query.filter(models.Corridor.kind == kind)
+    if q:
+        query = query.filter(models.Corridor.corridor_id.like(f"%{q.upper()}%"))
+    if min_trains:
+        query = query.filter(models.Corridor.train_count >= min_trains)
+    rows = query.order_by(models.Corridor.train_count.desc()).limit(limit).all()
+    return [
+        {
+            "corridor_id": c.corridor_id, "kind": c.kind,
+            "from_station_code": c.from_station_code, "to_station_code": c.to_station_code,
+            "intermediate_stations": json.loads(c.intermediate_stations or "[]"),
+            "section_ids": json.loads(c.section_ids or "[]"),
+            "section_count": c.section_count, "zone": c.zone,
+            "total_distance_km": c.total_distance_km, "train_count": c.train_count,
+            "derived_from": c.derived_from,
+        }
+        for c in rows
+    ]
+
+
+@router.get("/api/corridors/{corridor_id}")
+def get_corridor(corridor_id: str, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    c = db.query(models.Corridor).filter_by(corridor_id=corridor_id).first()
+    if not c:
+        raise HTTPException(status_code=404, detail=f"corridor '{corridor_id}' not found — run POST /api/corridors/build after loading the timetable")
+    station_codes = [c.from_station_code] + json.loads(c.intermediate_stations or "[]") + [c.to_station_code]
+    stations = {s.station_code: s for s in db.query(models.Station).filter(models.Station.station_code.in_(station_codes)).all()}
+    return {
+        "corridor_id": c.corridor_id, "kind": c.kind,
+        "from_station_code": c.from_station_code, "to_station_code": c.to_station_code,
+        "intermediate_stations": json.loads(c.intermediate_stations or "[]"),
+        "section_ids": json.loads(c.section_ids or "[]"),
+        "section_count": c.section_count, "zone": c.zone,
+        "total_distance_km": c.total_distance_km, "train_count": c.train_count,
+        "derived_from": c.derived_from,
+        "geometry": json.loads(c.geometry_json) if c.geometry_json else None,
+        "stations": [
+            {
+                "station_code": code,
+                "station_name": stations[code].station_name if code in stations else None,
+                "station_type": stations[code].station_type if code in stations else None,
+                "state": stations[code].state if code in stations else None,
+                "lat": stations[code].lat if code in stations else None,
+                "lon": stations[code].lon if code in stations else None,
+            }
+            for code in station_codes
+        ],
+    }
 
 
 @router.get("/api/stations")
@@ -56,6 +155,36 @@ def list_stations(db: Session = Depends(get_db), q: str = None, limit: int = 100
         )
     rows = query.limit(limit).all()
     return [{"station_code": r.station_code, "station_name": r.station_name, "zone": r.zone, "lat": r.lat, "lon": r.lon} for r in rows]
+
+
+@router.get("/api/corridor-search")
+def search_corridor(
+    from_station: str,
+    to_station: str,
+    date: dt.date = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """§10: read-only corridor-range search — any authenticated user (every
+    role, not one department), reachable without touching scheduling, the
+    optimizer, or governance. `date` is an IST CALENDAR date: if omitted, it
+    defaults to today IN IST (ist_today(), not the server's local/UTC date —
+    these can genuinely differ near midnight, exactly the bug this whole
+    timezone fix targets)."""
+    search_date = date or ist_today()
+    try:
+        result = corridor_search.search(db, from_station, to_station, search_date)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    # Cheap, read-only audit trail (explicitly allowed by the feature spec)
+    # — no scheduling/task/governance state is touched.
+    log(
+        db, "corridor_search", current_user.user_id,
+        {"from_station": from_station, "to_station": to_station, "date_ist": search_date.isoformat(),
+         "corridor_id": result["corridor_id"], "corridor_match": result["corridor_match"]},
+    )
+    return result
 
 
 @router.get("/api/network-map")
@@ -202,78 +331,81 @@ def create_corridor_availability(
 
 @router.post("/api/corridor-availability/derive")
 def derive_corridor_availability(
-    payload: schemas.DeriveAvailabilityRequest,
+    corridor_id: str,
+    date_from: dt.date = None,
+    date_to: dt.date = None,
+    buffer_minutes: int = vacancy.DEFAULT_BUFFER_MINUTES,
+    min_window_hours: float = vacancy.DEFAULT_MIN_WINDOW_HOURS,
+    horizon: str = "weekly",
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.require_role("COA")),
 ):
-    if payload.horizon not in HORIZON_DAYS:
-        raise HTTPException(status_code=400, detail="horizon must be 'weekly' or 'monthly'")
+    """Fix 3: computes REAL corridor vacancy from actual train movements in
+    the loaded timetable — every section of the corridor must be
+    simultaneously free, with a safety buffer around each movement — and
+    stores the result as CorridorSlot rows carrying the bracketing trains.
 
+    date_from/date_to are IST calendar dates (default: today IST through
+    +6 days). Fully re-runnable: previously derived slots in that range are
+    replaced, never duplicated; manually-added windows are left untouched.
+    Uses ONLY the static timetable — no live API dependency."""
+    if horizon not in HORIZON_DAYS:
+        raise HTTPException(status_code=400, detail="horizon must be 'weekly' or 'monthly'")
+    if buffer_minutes < 0:
+        raise HTTPException(status_code=400, detail="buffer_minutes must be >= 0")
+    if min_window_hours <= 0:
+        raise HTTPException(status_code=400, detail="min_window_hours must be > 0")
+
+    date_from = date_from or ist_today()
+    date_to = date_to or (date_from + dt.timedelta(days=HORIZON_DAYS[horizon] - 1))
+
+    section_ids = corridor_builder.get_section_ids(db, corridor_id)
     has_trains = (
         db.query(models.TrainTimetableEntry)
-        .filter(models.TrainTimetableEntry.corridor_id == payload.corridor_id)
+        .filter(models.TrainTimetableEntry.corridor_id.in_(section_ids))
         .first()
     )
     if not has_trains:
         raise HTTPException(
             status_code=404,
-            detail=f"no timetable entries loaded for corridor '{payload.corridor_id}'. Load the timetable first, "
-            "or check /api/timetable/top-corridors for corridor IDs that actually have real train movements.",
+            detail=f"no timetable entries loaded for corridor '{corridor_id}' (sections: {section_ids}). Load the "
+            "timetable first, or check /api/corridors for corridor IDs that actually carry real train movements.",
         )
 
-    horizon_start = payload.start_date or dt.date.today()
-    horizon_days = HORIZON_DAYS[payload.horizon]
-    gaps, occurrences = timetable_loader.derive_gaps(
-        db, payload.corridor_id, horizon_start, horizon_days, payload.min_gap_hours
-    )
-
-    # clear previously-derived (not manual) slots for this corridor+horizon before re-deriving
-    db.query(models.CorridorSlot).filter(
-        models.CorridorSlot.corridor_id == payload.corridor_id,
-        models.CorridorSlot.horizon == payload.horizon,
-        models.CorridorSlot.derived_from == "timetable_gap",
-    ).delete()
-
-    created = []
-    for gap in gaps:
-        slot = models.CorridorSlot(
-            slot_id=f"slot-{uuid.uuid4().hex[:8]}",
-            corridor_id=payload.corridor_id,
-            start_time=gap["start"],
-            end_time=gap["end"],
-            status="available",
-            derived_from="timetable_gap",
-            horizon=payload.horizon,
+    try:
+        result = vacancy.derive_and_store(
+            db, corridor_id, date_from, date_to,
+            buffer_minutes=buffer_minutes, min_window_hours=min_window_hours, horizon=horizon,
         )
-        db.add(slot)
-        created.append(
-            {
-                "slot_id": slot.slot_id,
-                "start_time": gap["start"],
-                "end_time": gap["end"],
-                "duration_hours": round((gap["end"] - gap["start"]).total_seconds() / 3600.0, 2),
-                "preceding_train": gap["preceding_train"],
-                "following_train": gap["following_train"],
-            }
-        )
-    db.commit()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     log(
-        db,
-        "corridor_availability_derived",
-        current_user.user_id,
-        {"corridor_id": payload.corridor_id, "horizon": payload.horizon, "gaps_found": len(created)},
+        db, "corridor_availability_derived", current_user.user_id,
+        {"corridor_id": corridor_id, "date_from_ist": date_from.isoformat(), "date_to_ist": date_to.isoformat(),
+         "buffer_minutes": buffer_minutes, "windows_found": result["windows_found"],
+         "sections": result["section_count"]},
     )
+    return result
 
-    return {
-        "corridor_id": payload.corridor_id,
-        "horizon": payload.horizon,
-        "horizon_start": horizon_start,
-        "horizon_days": horizon_days,
-        "real_train_movements_considered": len(occurrences),
-        "gaps_found": len(created),
-        "slots": created,
-    }
+
+@router.get("/api/corridor-availability/verify")
+def verify_corridor_availability(
+    corridor_id: str,
+    date_from: dt.date = None,
+    date_to: dt.date = None,
+    buffer_minutes: int = vacancy.DEFAULT_BUFFER_MINUTES,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """Independent correctness check: re-expands every real train movement
+    on every section of the corridor and asserts no stored vacancy window
+    overlaps any of them (buffer included). Deliberately implemented as a
+    separate naive scan rather than reusing the derivation code — a check
+    that shares the code it checks proves nothing."""
+    date_from = date_from or ist_today()
+    date_to = date_to or (date_from + dt.timedelta(days=6))
+    return vacancy.verify_no_overlap(db, corridor_id, date_from, date_to, buffer_minutes)
 
 
 @router.post("/api/corridor-availability/derive-ml-forecast")

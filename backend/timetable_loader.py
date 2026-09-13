@@ -25,10 +25,12 @@ from collections import defaultdict
 from sqlalchemy.orm import Session
 
 import models
+from tz_utils import IST, UTC, ist_date_to_utc_bounds, to_ist
 
 RAW_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "raw")
 STATIONS_PATH = os.path.join(RAW_DIR, "stations.json")
 SCHEDULES_PATH = os.path.join(RAW_DIR, "schedules.json")
+TRAINS_PATH = os.path.join(RAW_DIR, "trains.json")  # real service type/zone per train number
 
 SOURCE_LABEL = "datameet_github_mirror_of_data_gov_in"
 SOURCE_URL = "https://raw.githubusercontent.com/datameet/railways/master/schedules.json"
@@ -36,6 +38,18 @@ SOURCE_URL = "https://raw.githubusercontent.com/datameet/railways/master/schedul
 # Arbitrary anchor date. Only the time-of-day (and whether arrival rolled
 # into the next stored day, for overnight legs) is ever read back out.
 ANCHOR_DATE = dt.date(2000, 1, 1)
+
+# TIMEZONE CORRECTNESS: the real published Indian Railways timetable times
+# in the source dataset (e.g. "22:00:00") are IST wall-clock times — that is
+# the only sensible reading of a real published Indian train timetable, and
+# the whole point of this system correctly reflecting real train movements
+# depends on it. Every scheduled_departure/scheduled_arrival stored below is
+# therefore explicitly converted from "this time-of-day, in IST" to its
+# UTC-equivalent instant before being written to the DB — matching this
+# codebase's uniform storage contract (see tz_utils.py) that every stored
+# datetime is a UTC instant. Getting this wrong would silently shift every
+# real train's displayed time by exactly 5.5 hours once IST-correct display
+# was added elsewhere — this is precisely the bug this conversion prevents.
 
 
 def _parse_time(value: str):
@@ -52,41 +66,42 @@ def files_present() -> bool:
     return os.path.exists(STATIONS_PATH) and os.path.exists(SCHEDULES_PATH)
 
 
-def load_stations(db: Session) -> int:
-    with open(STATIONS_PATH, encoding="utf-8") as f:
-        data = json.load(f)
-    feats = data["features"] if isinstance(data, dict) else data
+# NOTE: station loading lives in station_loader.py, not here. The version
+# that used to sit at this spot did a DELETE-ALL-then-reinsert and dropped
+# the source's state/address fields entirely; station_loader.load_stations()
+# replaces it with an idempotent, multi-source, gap-reporting upsert.
 
-    db.query(models.Station).delete()
-    rows = []
-    seen = set()
+
+def _train_metadata() -> dict:
+    """train_number -> {service_type, zone} from the real trains.json in the
+    same DataMeet dataset. The schedule rows carry no service class, so
+    service_type was previously stored empty for every segment; this fills
+    it with the dataset's own real `type` value (EXP / DEMU / MEMU / SF /
+    PASS ...). Missing file is tolerated — the timetable still loads, just
+    without service types, rather than failing or inventing one."""
+    if not os.path.exists(TRAINS_PATH):
+        return {}
+    try:
+        with open(TRAINS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (ValueError, OSError):
+        return {}
+    feats = data["features"] if isinstance(data, dict) else data
+    out = {}
     for feat in feats:
-        props = feat.get("properties", {})
-        code = props.get("code")
-        if not code or code in seen:
-            continue
-        seen.add(code)
-        geom = feat.get("geometry") or {}
-        coords = geom.get("coordinates") if geom.get("type") == "Point" else None
-        lon, lat = (coords[0], coords[1]) if coords and len(coords) == 2 else (None, None)
-        rows.append(
-            {
-                "station_code": code,
-                "station_name": props.get("name") or code,
-                "zone": props.get("zone") or "",
-                "lat": lat,
-                "lon": lon,
-            }
-        )
-    db.bulk_insert_mappings(models.Station, rows)
-    db.commit()
-    return len(rows)
+        props = (feat.get("properties") or {}) if isinstance(feat, dict) else {}
+        number = props.get("number")
+        if number:
+            out[str(number)] = {"service_type": props.get("type") or "", "zone": props.get("zone") or ""}
+    return out
 
 
 def load_timetable(db: Session) -> dict:
     """Parses the full real schedule dataset into TrainTimetableEntry segments."""
     with open(SCHEDULES_PATH, encoding="utf-8") as f:
         schedule_rows = json.load(f)
+
+    train_meta = _train_metadata()
 
     by_train_day = defaultdict(list)
     for row in schedule_rows:
@@ -103,10 +118,16 @@ def load_timetable(db: Session) -> dict:
             arr_t = _parse_time(b.get("arrival"))
             if dep_t is None or arr_t is None:
                 continue
-            dep_dt = dt.datetime.combine(ANCHOR_DATE, dep_t)
-            arr_dt = dt.datetime.combine(ANCHOR_DATE, arr_t)
-            if arr_dt <= dep_dt:
-                arr_dt += dt.timedelta(days=1)  # overnight leg
+            # Build the IST wall-clock instant first (overnight rollover is
+            # an IST calendar concept — a train published as departing
+            # 23:50 and arriving 00:10 crosses midnight IST, not UTC
+            # midnight), THEN convert to the UTC instant actually stored.
+            dep_dt_ist = dt.datetime.combine(ANCHOR_DATE, dep_t, tzinfo=IST)
+            arr_dt_ist = dt.datetime.combine(ANCHOR_DATE, arr_t, tzinfo=IST)
+            if arr_dt_ist <= dep_dt_ist:
+                arr_dt_ist += dt.timedelta(days=1)  # overnight leg
+            dep_dt = dep_dt_ist.astimezone(UTC).replace(tzinfo=None)
+            arr_dt = arr_dt_ist.astimezone(UTC).replace(tzinfo=None)
             corridor_id = f"{a['station_code']}-{b['station_code']}"
             entries.append(
                 {
@@ -117,7 +138,7 @@ def load_timetable(db: Session) -> dict:
                     "corridor_id": corridor_id,
                     "scheduled_departure": dep_dt,
                     "scheduled_arrival": arr_dt,
-                    "service_type": "",
+                    "service_type": train_meta.get(str(train_number), {}).get("service_type", ""),
                     "source": SOURCE_LABEL,
                 }
             )
@@ -155,7 +176,20 @@ def top_corridors(db: Session, limit: int = 15):
 
 def corridor_occurrences(db: Session, corridor_id: str, horizon_start: dt.date, horizon_days: int):
     """Expand recurring daily segment templates into concrete datetime
-    occurrences of real train movements across the requested horizon."""
+    occurrences of real train movements across the requested horizon.
+
+    horizon_start is an IST CALENDAR date (see tz_utils.ist_today —
+    "this week" for an Indian railway corridor means the IST week, so the
+    day-by-day expansion below must walk IST calendar days). Each template's
+    real time-of-day is itself IST (see the load_timetable() note above), so
+    it's read back out in IST (to_ist(...).time()) before being recombined
+    with the IST calendar date being expanded — combining a UTC time-of-day
+    with an IST calendar date would silently misplace any train whose IST
+    time, once shifted to UTC, crosses a calendar-day boundary (exactly the
+    near-midnight bug this whole fix targets). The final instant is
+    converted back to UTC for storage-comparable output, since every other
+    naive datetime this function's callers compare against (CorridorSlot
+    times, etc.) is naive-but-UTC by this codebase's uniform contract."""
     templates = (
         db.query(models.TrainTimetableEntry)
         .filter(models.TrainTimetableEntry.corridor_id == corridor_id)
@@ -163,11 +197,12 @@ def corridor_occurrences(db: Session, corridor_id: str, horizon_start: dt.date, 
     )
     occurrences = []
     for t in templates:
-        duration = t.scheduled_arrival - t.scheduled_departure
-        dep_time = t.scheduled_departure.time()
+        duration = t.scheduled_arrival - t.scheduled_departure  # a span, timezone-invariant
+        dep_time_ist = to_ist(t.scheduled_departure).time()
         for day_index in range(horizon_days):
-            date = horizon_start + dt.timedelta(days=day_index)
-            dep = dt.datetime.combine(date, dep_time)
+            ist_date = horizon_start + dt.timedelta(days=day_index)
+            dep_ist = dt.datetime.combine(ist_date, dep_time_ist, tzinfo=IST)
+            dep = dep_ist.astimezone(UTC).replace(tzinfo=None)
             arr = dep + duration
             occurrences.append(
                 {
@@ -181,62 +216,43 @@ def corridor_occurrences(db: Session, corridor_id: str, horizon_start: dt.date, 
     return occurrences
 
 
-def derive_gaps(db: Session, corridor_id: str, horizon_start: dt.date, horizon_days: int, min_gap_hours: float):
-    """Finds genuine traffic gaps on a corridor: windows with no scheduled
-    train movement, bracketed by the real trains on either side."""
-    occurrences = corridor_occurrences(db, corridor_id, horizon_start, horizon_days)
-    horizon_end = dt.datetime.combine(horizon_start, dt.time.min) + dt.timedelta(days=horizon_days)
-    horizon_begin = dt.datetime.combine(horizon_start, dt.time.min)
+def train_occurrences_on_date(db: Session, corridor_id: str, ist_date: dt.date):
+    """Like corridor_occurrences, but for exactly one IST calendar date and
+    returning full per-train detail (station codes, service_type) rather
+    than just start/end — what the corridor-search feature (§10) needs.
+    Reuses the identical duration-preserving IST-expansion approach as
+    corridor_occurrences so the two never disagree about what "this IST
+    date" means for a given train."""
+    templates = (
+        db.query(models.TrainTimetableEntry)
+        .filter(models.TrainTimetableEntry.corridor_id == corridor_id)
+        .all()
+    )
+    rows = []
+    for t in templates:
+        duration = t.scheduled_arrival - t.scheduled_departure
+        dep_time_ist = to_ist(t.scheduled_departure).time()
+        dep_ist = dt.datetime.combine(ist_date, dep_time_ist, tzinfo=IST)
+        dep_utc = dep_ist.astimezone(UTC).replace(tzinfo=None)
+        arr_utc = dep_utc + duration
+        rows.append(
+            {
+                "train_id": t.train_id,
+                "train_name": t.train_name,
+                "from_station_code": t.from_station_code,
+                "to_station_code": t.to_station_code,
+                "corridor_id": t.corridor_id,
+                "service_type": t.service_type,
+                "departure": dep_utc,
+                "arrival": arr_utc,
+            }
+        )
+    rows.sort(key=lambda r: r["departure"])
+    return rows
 
-    if not occurrences:
-        return [], occurrences
 
-    # merge overlapping/adjacent occupied windows
-    merged = []
-    for occ in occurrences:
-        if merged and occ["start"] <= merged[-1]["end"]:
-            merged[-1]["end"] = max(merged[-1]["end"], occ["end"])
-            merged[-1]["after_train"] = occ["train_id"]
-        else:
-            merged.append(
-                {
-                    "start": occ["start"],
-                    "end": occ["end"],
-                    "before_train": occ["train_id"],
-                    "after_train": occ["train_id"],
-                }
-            )
-
-    gaps = []
-    min_gap = dt.timedelta(hours=min_gap_hours)
-
-    cursor = horizon_begin
-    prev_train = None
-    for block in merged:
-        if block["start"] > cursor:
-            gap_len = block["start"] - cursor
-            if gap_len >= min_gap:
-                gaps.append(
-                    {
-                        "start": cursor,
-                        "end": block["start"],
-                        "preceding_train": prev_train,
-                        "following_train": block["before_train"],
-                    }
-                )
-        cursor = max(cursor, block["end"])
-        prev_train = block["after_train"]
-
-    if horizon_end > cursor:
-        gap_len = horizon_end - cursor
-        if gap_len >= min_gap:
-            gaps.append(
-                {
-                    "start": cursor,
-                    "end": horizon_end,
-                    "preceding_train": prev_train,
-                    "following_train": None,
-                }
-            )
-
-    return gaps, occurrences
+# NOTE: gap derivation lives in vacancy.py, not here. The derive_gaps()
+# that used to sit at this spot computed single-section gaps with NO safety
+# buffer and no multi-section intersection; vacancy.compute_vacancy()
+# replaces it with the real operational definition (buffered occupancy,
+# every section simultaneously free, bracketing trains recorded).

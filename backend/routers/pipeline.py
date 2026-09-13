@@ -17,6 +17,7 @@ import models
 from audit import log
 from database import get_db
 from pipeline import id_mapping
+from tz_utils import utc_now
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
@@ -105,7 +106,7 @@ def resolve_review_item(
     item.resolved_by = current_user.user_id
     import datetime as dt
 
-    item.resolved_at = dt.datetime.utcnow()
+    item.resolved_at = utc_now()
     db.commit()
 
     log(

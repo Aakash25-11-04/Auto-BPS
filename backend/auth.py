@@ -45,6 +45,7 @@ from sqlalchemy.orm import Session
 
 import models
 from database import get_db
+from tz_utils import utc_now
 
 # --- configuration -----------------------------------------------------
 
@@ -86,8 +87,9 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
 # --- token issuance --------------------------------------------------------
 
 def _new_token(user: models.User, token_type: str, expires_delta: dt.timedelta, extra_claims: dict = None) -> tuple:
-    now = dt.datetime.utcnow()
+    now = utc_now()
     jti = uuid.uuid4().hex
+    exp = now + expires_delta
     payload = {
         "sub": user.user_id,
         "role": user.role,
@@ -95,12 +97,20 @@ def _new_token(user: models.User, token_type: str, expires_delta: dt.timedelta, 
         "type": token_type,
         "jti": jti,
         "iat": now,
-        "exp": now + expires_delta,
+        "exp": exp,
     }
     if extra_claims:
         payload.update(extra_claims)
+    # jwt.encode() mutates `payload` in place, converting datetime claims
+    # (exp/iat) to raw POSIX-timestamp ints for the wire format — reading
+    # payload["exp"] back out AFTER this call silently returns an int, not
+    # the datetime the docstring/callers expect. This was a real latent bug
+    # (papered over by Pydantic's implicit int->datetime coercion on the
+    # old plain `dt.datetime` schema field) that the stricter UtcOut
+    # validator (see schemas.py) surfaces. Returning the `exp` captured
+    # BEFORE encoding is the actual fix.
     token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-    return token, jti, payload["exp"]
+    return token, jti, exp
 
 
 def create_access_token(user: models.User, extra_claims: dict = None) -> tuple:
@@ -142,14 +152,14 @@ def decode_refresh_token(token: str, db: Session) -> dict:
 def revoke_refresh_token(db: Session, payload: dict):
     if db.query(models.RevokedToken).filter_by(jti=payload["jti"]).first():
         return
-    db.add(models.RevokedToken(jti=payload["jti"], expires_at=dt.datetime.utcfromtimestamp(payload["exp"])))
+    db.add(models.RevokedToken(jti=payload["jti"], expires_at=dt.datetime.fromtimestamp(payload["exp"], tz=dt.timezone.utc).replace(tzinfo=None)))
     db.commit()
 
 
 # --- account lockout -------------------------------------------------------
 
 def is_locked(user: models.User) -> bool:
-    return bool(user.locked_until and user.locked_until > dt.datetime.utcnow())
+    return bool(user.locked_until and user.locked_until > utc_now())
 
 
 def register_failed_login(db: Session, user: models.User) -> bool:
@@ -159,7 +169,7 @@ def register_failed_login(db: Session, user: models.User) -> bool:
     user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
     newly_locked = False
     if user.failed_login_attempts >= MAX_FAILED_LOGIN_ATTEMPTS:
-        user.locked_until = dt.datetime.utcnow() + dt.timedelta(minutes=LOCKOUT_MINUTES)
+        user.locked_until = utc_now() + dt.timedelta(minutes=LOCKOUT_MINUTES)
         newly_locked = True
     db.commit()
     return newly_locked
